@@ -42,6 +42,7 @@ class Trial:
 
         self._time = None
         self._trialtime = None
+        self._downsample_probe = None
 
         self._probegroups = ['probe_position']
         self._ephysgroups = ['voltage_1','voltage_2','current_extEMG','current_1','current_2']
@@ -65,6 +66,11 @@ class Trial:
             self.create_time()
         return self._trialtime
 
+    @property
+    def downsample_probe(self):
+        if self._downsample_probe is None:
+            self.create_time()
+        return self._downsample_probe
 
     @property
     def as_duration(self):
@@ -138,6 +144,24 @@ class Trial:
         total_dur = samples / samprate
         self._time = np.linspace(-pre_dur, total_dur - pre_dur, np.int64(samples))
         self._trialtime = np.linspace(-pre_dur, trial_dur - pre_dur, np.int64(trialsamps))
+        self.create_probe_ds_time()
+
+    def create_probe_ds_time(self):
+        from scipy.stats import mode
+
+        arr = self.probe_position.ravel()
+        change_points = np.where(np.diff(arr) != 0)[0] + 1
+
+        # Calculate lengths of sequences
+        sequence_lengths = np.diff(np.concatenate(([0], change_points, [len(arr)])))
+        sequence_mode = mode(sequence_lengths).mode
+
+        time_zero_index = self.params['preDurInSec'] * self.params['sampratein']
+        trialsamps = len(self._trialtime)
+
+        indices = np.arange(time_zero_index, trialsamps, sequence_mode)
+        indices = np.concatenate((np.arange(time_zero_index, -1, -sequence_mode)[::-1], indices)).astype(int)
+        self._downsample_probe = indices
 
 
     def _classify_as_outcome(self):
