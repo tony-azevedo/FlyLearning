@@ -4,6 +4,9 @@ import h5py
 import numpy as np
 from matplotlib import pyplot as plt
 import pandas as pd
+from scipy.stats import mode
+
+k_spring_constant = 0.0829 #uN/um
 
 class Trial:
     """
@@ -26,6 +29,7 @@ class Trial:
     def __init__(self,fn):
         self.topdir = 'D:\\Data'
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
+        self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
         self.fn = get_file(fn)
         
         self.flycelldir = self.day + '_F' + str(self.fly) + '_C' + str(self.cell)
@@ -43,15 +47,17 @@ class Trial:
         self._time = None
         self._trialtime = None
         self._downsample_probe = None
+        self._frame_length_mode = None # this is the most likely number of samples per Pyas frame
 
         self._probegroups = ['probe_position']
         self._ephysgroups = ['voltage_1','voltage_2','current_extEMG','current_1','current_2']
         self._tgt_clrs = [(0.8,0.8,0.8),(0.6,0.6,1)]
 
         self._as_duration = None
-        self._as_outcome = None
+        self._as_outcome = None        
         self._is_rest = None
         self._is_probe = None
+
 
     @property
     def time(self):
@@ -69,7 +75,7 @@ class Trial:
     @property
     def downsample_probe(self):
         if self._downsample_probe is None:
-            self.create_time()
+            self.create_probe_downsample_idx()
         return self._downsample_probe
 
     @property
@@ -83,18 +89,25 @@ class Trial:
                 print("AttributeError:", e)
                 self.exclude()
                 self._as_duration = None
-                raise ValueError('Run Table.exclude_trials: {}'.format(self))
+                raise ValueError('Run Table.exclude_trials: {}'.format(self.fn))
         return self._as_duration
 
 
     @property
-    def as_outcome(self):
+    def as_outcome(self,rerun=True):
         if self.as_duration is None:
             self._as_outcome == None
-            raise ValueError('Run Table.exclude_trials: {}'.format(self))
+            raise ValueError('Run Table.exclude_trials: {}'.format(self.fn))
             # return self._as_outcome
         if self._as_outcome is None:
-            self._classify_as_outcome()
+            if not rerun:
+                if 'current_as_outcome' in self.groups:
+                    self._as_outcome= self.current_as_outcome.decode('utf-8')
+                    return self._as_outcome
+                else:
+                    self._classify_as_outcome(rerun=rerun)
+            else:
+                self._classify_as_outcome(rerun=rerun)
         return self._as_outcome
     
 
@@ -109,20 +122,29 @@ class Trial:
     def is_probe(self):
         if self._is_probe is None:
             try:
-                self._is_probe = (self.params['probeToggle'] == 0) 
+                self._is_probe = (self.params['controlToggle'] == 0) 
             except KeyError:
                 self._is_probe = False
         return self._is_probe
 
 
-    def exclude(self):
+    def exclude(self,reason=None):
         if not self.excluded:
             print('excluding: {}'.format(self))
             with h5py.File(join(self.path,self.fn),'r+') as hdf5_file:
                 flipped = 1-self.excluded
                 hdf5_file['excluded'][...] = flipped
                 setattr(self, 'excluded', flipped)
-            print('self.excluded: {}'.format(self.excluded))
+                print('self.excluded: {}'.format(self.excluded))
+        if not reason is None:
+            print('Reason for excluding is: {}'.format(reason))
+            reason = 'Exclusion: {}'.format(reason)
+            # with h5py.File(join(self.path,self.fn),'r+') as hdf5_file:
+                # raise NotImplementedError('try adding tags to trials to provide exclusion reason')
+                # self.tag(reason)
+            print('Excluded for {}: {}'.format(reason, self))
+        
+
 
     def include(self):
         if self.excluded:
@@ -144,61 +166,166 @@ class Trial:
         total_dur = samples / samprate
         self._time = np.linspace(-pre_dur, total_dur - pre_dur, np.int64(samples))
         self._trialtime = np.linspace(-pre_dur, trial_dur - pre_dur, np.int64(trialsamps))
-        self.create_probe_ds_time()
 
-    def create_probe_ds_time(self):
-        from scipy.stats import mode
 
+    def create_probe_downsample_idx(self):
         arr = self.probe_position.ravel()
-        change_points = np.where(np.diff(arr) != 0)[0] + 1
+        change_points = np.where(np.diff(arr) != 0)[0] + 1  # take the first element of tuple from where, and add 1 to get the next change point
 
-        # Calculate lengths of sequences
         sequence_lengths = np.diff(np.concatenate(([0], change_points, [len(arr)])))
-        sequence_mode = mode(sequence_lengths).mode
+        self._frame_length_mode = mode(sequence_lengths).mode
+        if self._frame_length_mode > 500:
+            print('Most common frame length is {} samples. Implement tagging reason'.format(self._frame_length_mode))
+            self.exclude() # self.exclude(reason='pyas stopped working')
 
         time_zero_index = self.params['preDurInSec'] * self.params['sampratein']
-        trialsamps = len(self._trialtime)
+        totalsamps = len(arr)
 
-        indices = np.arange(time_zero_index, trialsamps, sequence_mode)
-        indices = np.concatenate((np.arange(time_zero_index, -1, -sequence_mode)[::-1], indices)).astype(int)
+        # start the down sample vector at time_zero_index, go to total samps
+        after_indices = np.arange(time_zero_index, totalsamps, self._frame_length_mode)
+        # add the last index if it is not there (if DT doesn't fit)
+        if not totalsamps-1 in after_indices:
+            after_indices = np.append(after_indices,totalsamps-1)
+
+        before_indices = np.arange(time_zero_index-self._frame_length_mode, -1, -self._frame_length_mode)[::-1]
+        if not 0 in before_indices:
+            before_indices = np.insert(before_indices, 0, 0, axis=0)
+
+        indices = np.concatenate((before_indices,after_indices)).astype(int)
+
+        assert np.all(np.diff(indices) > 0)
         self._downsample_probe = indices
 
 
-    def _classify_as_outcome(self):
-        # outcomes_dict = {
-        #     'no_as_no_mv': 'no aversive stimulus, no movement',
-        #     'no_as_mv': 'no aversive stimulus, probe moves',
-        #     'as_off': 'fly turns off aversive stimulus during trial',
-        #     'as_off_late': 'fly turns off aversive stimulus in intertrial period',
-        #     'timeout': 'aversive stimulus never turned off, no movement',
-        #     'timeout_fail': 'aversive stimulus never turned off, even though there movement',
-        #     'probe': 'probe_trial',
-        #     'rest': 'rest trial',
-        # }
-        # outcomes_cat = pd.api.types.CategoricalDtype(categories=outcomes_dict.keys(), ordered=True)
+    def _classify_as_outcome(self,rerun=False):
 
-        if self.is_rest:
-            self._as_outcome = 'rest'
-        
-        elif self.is_probe:
-            self._as_outcome = 'probe'
+        if (self._as_outcome is None) or rerun:
+            if self.is_rest:
+                self._as_outcome = 'rest'
+            
+            elif self.is_probe:
+                self._as_outcome = 'probe'
 
-        elif self._as_duration==0:
-            self._as_outcome = 'no_as_no_mv'
-            # if self._post_stim_var > self._mv_thresh:
-            #     self._as_outcome = 'no_as_mv'
-        elif self.as_duration < self.params['samples']/self.params['sampratein'] - self.params['preDurInSec']:
-            self._as_outcome = 'as_off_late'
-            if self._as_duration < self.params['stimDurInSec']:
+            elif self._as_duration==0:
+                self._as_outcome = 'no_as_no_mv'
+                
+                # but is the probe in the target the entire time?
+                probe_position = self.probe_position.ravel()
+
+                target_min = self.params['pyasXPosition']
+                target_max = self.params['pyasXPosition'] + self.params['pyasWidth']
+                if any(probe_position<target_min) | any(probe_position>target_max):
+                    # print('Trial {}: probe leaves target'.format(self))
+                    self._as_outcome = 'no_as_mv'
+
+            elif self.as_duration < self.params['stimDurInSec']:
                 self._as_outcome = 'as_off'
-        
+            else:
+                probe_position = self.probe_position[self.time>0].ravel()
+                target_min = self.params['pyasXPosition']
+                target_max = self.params['pyasXPosition'] + self.params['pyasWidth']
+                if any((probe_position>target_min) & (probe_position<target_max)):
+                    self._as_outcome = 'as_off_late'
+                elif all(probe_position<target_min):
+                    self._as_outcome = 'timeout_fail'
+                    # if self._post_stim_var > self._mv_thresh:
+                    #     self._as_outcome = 'timeout_fail'
+                else: 
+                    self._as_outcome = 'timeout'
+
+            with h5py.File(join(self.path,self.fn),'r+') as hdf5_file:
+                if 'current_as_outcome' in hdf5_file:
+                    # Overwrite contents of existing dataset
+                    hdf5_file['current_as_outcome'][...] = self._as_outcome
+                else:
+                    # Create new dataset
+                    hdf5_file.create_dataset('current_as_outcome', data=self._as_outcome)
+                    hdf5_file['current_as_outcome'][...] = self._as_outcome
         else:
-            self._as_outcome = 'timeout'
-            # if self._post_stim_var > self._mv_thresh:
-            #     self._as_outcome = 'timeout_fail'
+            raise KeyError('Is the current as outcome correct?')
+
+    ## Compute functions, using the downsampled probe
+    def probe_velocity(self):
+        x = self.probe_position[self.downsample_probe].squeeze()
+        t = self.time[self.downsample_probe]
+        # assert x.shape == t.shape
+        # print(x.shape)
+        # print(t.shape)
+        v = np.gradient(x, t)
+        # assert x.shape == t.shape
+        return v
+
+    
+    def probe_acceleration(self):
+        """A measure of effort in motor control"""
+        ds_v = self.probe_velocity()
+        ds_time = self.time[self.downsample_probe]
+        a = np.gradient(ds_v, ds_time)
+        return a
 
 
+    def probe_mean_velocity(self,):
+        """Integral of abs(velocity)"""
+        vigor = np.mean(np.abs(self.probe_velocity))
+        return vigor
+    
 
+    def probe_rms_velocity(self):
+        """Weights faster movements more"""
+        v = self.probe_velocity()
+        rms_vigor = np.sqrt(np.mean(v**2))
+        return rms_vigor
+
+
+    def probe_jerk_energy(self):
+        """A measure of effort in motor control"""
+        ds_time = self.time[self.downsample_probe]
+        jerk = np.gradient(self.probe_acceleration(), ds_time)
+        jerk_energy = np.sum(jerk**2) * np.diff(ds_time[2:3])
+        return jerk_energy
+
+
+    def probe_power(self):
+        x = self.probe_position[self.downsample_probe].squeeze()
+        v = self.probe_velocity()
+        power = -k_spring_constant * x * v
+        return power
+
+
+    def probe_work(self):
+        """Work Done Against the Spring"""
+        t = self.time[self.downsample_probe]
+        power = self.probe_power()
+        work = np.trapz(power,t)
+        return work
+
+
+    def probe_holding_cost(self):
+        """Holding Cost (integrated potential energy)"""
+        t = self.time[self.downsample_probe]
+        x = self.probe_position[self.downsample_probe].squeeze()
+        U = 0.5 * k_spring_constant * x**2
+        holding_cost = np.trapz(U, t)
+        return holding_cost
+
+
+    def probe_positive_effort(self):
+        power = self.probe_power()
+        t = self.time[self.downsample_probe]
+        effort = np.trapz(np.clip(power, a_min=0, a_max=None), t)
+        return effort
+    
+
+    def probe_effort(self, alpha=1e-6, beta = 1e-2):
+        """Effort Cost Function, symetric, Not in use"""
+        x = self.probe_position[self.downsample_probe].squeeze()
+        t = self.time[self.downsample_probe]
+        v = self.probe_velocity()
+        effort = np.trapz(alpha * v**2 + beta * x**2, t)
+        return effort
+
+
+    ## plotting functions
     def plot_group(self, group_name, use_full_time=True):
         """Plot the data from a specified group over self.time or self.trialtime.
 
@@ -215,12 +342,16 @@ class Trial:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{group_name}'")
 
 
-    def plot_probe_groups(self,use_full_time=True):           # Additional plot for probe_position
+    def plot_probe_groups(self,use_full_time=True,use_full_y = False,from_zero = False,savefig=False,format=None):           # Additional plot for probe_position
         probe_position = getattr(self,'probe_position',None)
         arduino_output = getattr(self,'arduino_output',None)
         
         target_y = self.params['pyasXPosition']
         target_width = self.params['pyasWidth']
+        probe_zero = self.params['probeZero']
+        if from_zero:
+            target_y = target_y-probe_zero
+            probe_position = probe_position - probe_zero
         if use_full_time:
             time_array = self.time 
         else:
@@ -246,10 +377,27 @@ class Trial:
         plt.xlabel("Time (s)")
         plt.ylabel("um")
         plt.xlim(time_array[0], time_array[-1])
-        plt.ylim([self.params['probeZero'] - 500, self.params['probeZero'] + 20])
-        plt.axhline(y=self.params['probeZero'], xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+        if not from_zero:
+            if not use_full_y:
+                plt.ylim([self.params['probeZero'] - 500, self.params['probeZero'] + 20])
+            else:
+                plt.ylim([0, 1280])
+            plt.axhline(y=self.params['probeZero'], xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+
+        else:
+            if not use_full_y:
+                plt.ylim([0 - 500, 0 + 20])
+            else:
+                plt.ylim([0, 1280]-self.params['probeZero'])
+            plt.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+
         # plt.grid(True)
         plt.show()
+
+        if savefig or (not format is None):
+            format = format or 'png'
+            plt.savefig(f'./figpanels/{self._dfc}_Trial_{self.params['trial']}_probe_plot.{format}',format=format)
+
 
     def _plot_ephys_groups(self,group_name,use_full_time=True):           # Additional plot for probe_position
         data = getattr(self,group_name,None)
@@ -265,10 +413,7 @@ class Trial:
         plt.xlabel("Time (s)")
         plt.ylabel("Value")
         plt.grid(True)
-        plt.show()
-
         plt.legend()
-
         plt.show()
 
 
@@ -349,7 +494,9 @@ class Trial:
         group_obj = type(group.name, (object,), {'_group': group, '_loaded_attrs': {}})()
         return group_obj
 
-
+    # ---------------------------------------------------------
+    # Dunder Methods
+    # ---------------------------------------------------------
     def __getattr__(self, name):
 
         # if name in ['file_path', 'params', '_refs', 'groups']:
