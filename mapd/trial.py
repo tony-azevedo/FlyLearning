@@ -99,15 +99,17 @@ class Trial:
             self._as_outcome == None
             raise ValueError('Run Table.exclude_trials: {}'.format(self.fn))
             # return self._as_outcome
+
         if self._as_outcome is None:
             if not rerun:
                 if 'current_as_outcome' in self.groups:
-                    self._as_outcome= self.current_as_outcome.decode('utf-8')
+                    self._as_outcom = self.current_as_outcome.decode('utf-8')
                     return self._as_outcome
                 else:
                     self._classify_as_outcome(rerun=rerun)
             else:
                 self._classify_as_outcome(rerun=rerun)
+
         return self._as_outcome
     
 
@@ -197,7 +199,7 @@ class Trial:
         self._downsample_probe = indices
 
 
-    def _classify_as_outcome(self,rerun=False):
+    def _classify_as_outcome(self,rerun=True):
 
         if (self._as_outcome is None) or rerun:
             if self.is_rest:
@@ -232,15 +234,7 @@ class Trial:
                     #     self._as_outcome = 'timeout_fail'
                 else: 
                     self._as_outcome = 'timeout'
-
-            with h5py.File(join(self.path,self.fn),'r+') as hdf5_file:
-                if 'current_as_outcome' in hdf5_file:
-                    # Overwrite contents of existing dataset
-                    hdf5_file['current_as_outcome'][...] = self._as_outcome
-                else:
-                    # Create new dataset
-                    hdf5_file.create_dataset('current_as_outcome', data=self._as_outcome)
-                    hdf5_file['current_as_outcome'][...] = self._as_outcome
+            self._write_string_to_hdf5('current_as_outcome',self._as_outcome)
         else:
             raise KeyError('Is the current as outcome correct?')
 
@@ -494,6 +488,26 @@ class Trial:
         group_obj = type(group.name, (object,), {'_group': group, '_loaded_attrs': {}})()
         return group_obj
 
+    def _write_string_to_hdf5(self, name, data):
+        """Wrapper function to write data to HDF5 file."""
+        dt = h5py.string_dtype(encoding='utf-8')
+
+        encoded = data.encode('utf-16-le')
+        data_array = np.frombuffer(encoded, dtype=np.uint16)
+        dt = 'uint16'
+
+        need_to_set_attrs = False
+        with h5py.File(join(self.path,self.fn),'r+') as hdf5_file:
+            if name in hdf5_file:
+                # Overwrite contents of existing dataset
+                hdf5_file[name][...] = data_array
+            else:
+                # Create new dataset
+                dset = hdf5_file.create_dataset(name, data=data_array, dtype=dt)                
+                ascii_dtype = h5py.string_dtype(encoding='ascii', length=4)  # 'char' is 4 letters
+                dset.attrs.create("MATLAB_class", 'char', dtype=ascii_dtype)
+                dset.attrs.create("MATLAB_int_decode", np.uint8(2))
+
     # ---------------------------------------------------------
     # Dunder Methods
     # ---------------------------------------------------------
@@ -504,6 +518,9 @@ class Trial:
         
         """Lazy load the attribute from the HDF5 file."""
         with h5py.File(self.file_path, 'r') as file:
+            if name == 'params' and self.params is not None:
+                return self.params
+            
             if name in file:
                 # print(name)
                 group = file[name]
@@ -515,9 +532,9 @@ class Trial:
                     dataset_value = group[()]
                     setattr(self, name, dataset_value)
                     return dataset_value
-            elif name == 'params' and self.params is not None:
-                return self.params
-
+                else:
+                    raise TypeError(f"Unsupported type for attribute '{name}': {type(group)}")
+            
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def __dir__(self):

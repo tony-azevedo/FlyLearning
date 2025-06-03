@@ -9,8 +9,10 @@ import pandas as pd
 import swifter
 import numpy as np
 from datetime import datetime, timedelta
-from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
+
 import seaborn as sns
 from functools import wraps
 
@@ -26,8 +28,11 @@ def auto_ax_and_save(default_title=None):
         def wrapper(self, *args, ax=None, format=None, savefig=False, **kwargs):
             created_fig = None
             if ax is None:
-                fig, ax = plt.subplots()
+                fig = Figure(figsize=(8, 6), dpi=200)
+                canvas = FigureCanvas(fig)
+                ax = fig.add_subplot(111)
                 created_fig = fig
+                
 
             trial_ids = kwargs.get("index", args[0] if args else None)
             trial_str = ""
@@ -50,8 +55,6 @@ def auto_ax_and_save(default_title=None):
                 filename = f"{func.__name__}{trial_str}.{fmt}"
                 # fig.tight_layout()
                 fig.savefig(f'{self.fig_folder}/{self._dfc}_{func.__name__}{trial_str}.{fmt}',transparent=True)
-                # fig.savefig(filename, format=fmt, bbox_inches='tight')
-                # plt.close(fig)
 
 
             return result
@@ -68,7 +71,10 @@ def pyas_state(df):
 
 
 def plot_some_trials(self,index,from_zero=True,savefig=False,format=None):
-    fig, axs = plt.subplots(3, 1, figsize=(8, 10))
+    fig = Figure(figsize=(8, 10), dpi=200)
+    canvas = FigureCanvas(fig)
+    axs = [fig.add_subplot(3, 1, i + 1) for i in range(3)]
+
     self.plot_some_as_piezo(index,ax=axs[0])
     self.plot_some_probe_groups(index,ax=axs[1],from_zero=from_zero)
     self.plot_some_phys(index,ax=axs[2],from_zero=from_zero)
@@ -80,7 +86,8 @@ def plot_some_trials(self,index,from_zero=True,savefig=False,format=None):
         fig.savefig(figfn)
         print(f'Saved: {figfn}')
         # fig.savefig(filename, format=fmt, bbox_inches='tight')
-        # plt.close(fig)
+    
+    return fig, axs
 
 
 @auto_ax_and_save(default_title="Probe position")
@@ -149,7 +156,7 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
     cumulative_probeZero = np.concatenate(probeZero_list)
 
     for tgt_y,tgt_w,tlm,tgt_clr in zip(target_y_list,target_width_list,tlims_list,target_color_list):
-        ax.add_patch(plt.Rectangle(
+        ax.add_patch(patches.Rectangle(
             (tlm[0], tgt_y),  # Bottom-left corner
             width=max(tlm) - min(tlm),  # Full time range
             height=tgt_w,  # Width of the target
@@ -257,7 +264,10 @@ def plot_some_phys(self,index=None,from_zero=False,ax=None,savefig=False,format=
 def plot_outcomes(self,savefig=False,format='png'):
     # Plot each row as a vertical tick mark at its categorical position
     
-    fig, ax = plt.subplots(figsize=(8,4))
+    fig = Figure(figsize=(6.4, 0.64), dpi=200)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(1, 1, 1)
+    
     rec_min = self.df['as_outcome'].cat.categories.get_loc('no_as_no_mv')
     rec_max = self.df['as_outcome'].cat.categories.get_loc('probe')
 
@@ -368,7 +378,7 @@ def plot_outcomes(self,savefig=False,format='png'):
     if savefig:
         fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_as_outcomes.{format}',format=format)
     
-    plt.show()
+    return fig, ax
 
 
 def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=None,index=None,savefig=False,format=None):
@@ -407,7 +417,9 @@ def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=Non
     most_common_tuples = Counter(target_tuples).most_common(2)
     # print(most_common_tuples)
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    fig = Figure(figsize=(6, 6), dpi=200)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(111)
 
     for mct_item in most_common_tuples:
         mct = mct_item[0]
@@ -454,13 +466,15 @@ def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=Non
             fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_probe_dist_all.{format}',format=format)
             return
         
-    plt.show()
+    return fig, ax
 
 
 def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=None,cmax=None):
     probe_position_hm_df = self.get_probe_position_df()
 
-    fig, ax = plt.subplots(figsize=(8, 8))  # Adjust figsize as needed
+    fig = Figure(figsize=(8, 8), dpi=300)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(111)
     # sns.heatmap(probe_position_df, cmap="rocket", ax=ax, cbar_kws={'label': 'probe_position'})
     rocket_cmap = sns.color_palette("rocket", as_cmap=True)
     
@@ -548,16 +562,12 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
     # ax.set_yticks(tick_values)
     # ax.set_yticklabels([f"{tv:.1f}" for tv in tick_values])  # Format times as needed
     
-    # # Show the plot
-    # plt.tight_layout()
-    plt.show()
-
     if savefig or (not format is None):
         format = format or 'png'
         fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_heatmap.{format}',format=format)
 
 
-    return probe_position_hm_df
+    return fig, ax, probe_position_hm_df
 
 
 def plot_sensory_responses(self,target=None,piezo_step=None):
@@ -570,7 +580,9 @@ def plot_trial_computations(self,method_name: str,savefig=False,format='png'):
         raise ValueError(f"Column '{method_name}' not found in DataFrame. "
                          f"Call compute_trial_method('{method_name}') first.")
     
-    fig, ax = plt.subplots()
+    fig = Figure(figsize=(8, 6), dpi=200)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(111)
     y = self.df[method_name]
     rec_min = 0
     rec_max = y.max()
@@ -588,7 +600,7 @@ def plot_trial_computations(self,method_name: str,savefig=False,format='png'):
     if savefig:
         fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_{method_name}.{format}',format=format)
     
-    plt.show()
+    return fig, ax
 
 
 def plot_plotting_context(self,ax=None,rec_min=0,rec_max=1):

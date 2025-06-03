@@ -3,6 +3,7 @@ from .helpers import get_day_fly_cell, get_file
 # from .table_plotters import plot_some_trials, plot_outcomes, plot_probe_distribution, probe_position_heatmap
 import types
 from . import table_plotters
+from . import probe_movie_maker
 from .trial import Trial
 import os
 import subprocess
@@ -11,7 +12,10 @@ import pandas as pd
 import swifter
 import numpy as np
 from datetime import datetime, timedelta
-from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
+# from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 import seaborn as sns
 
@@ -77,13 +81,12 @@ class Table:
 
         self._tfn_template = None
         self._trial_file_name_template()
-
-        self.genotype = None
-        self._get_genotype()
         
         self._excluded_df = None
         self.exclude_trials()
-
+        
+        self._genotype = None
+        
         self.hmdf = None
 
 
@@ -98,6 +101,11 @@ class Table:
     def _outcomes_cat(self):
         return _outcomes_cat
 
+    @property
+    def genotype(self):
+        if self._genotype is None:
+            self._get_genotype()
+        return self._genotype
 
     def exclude_trials(self):
         if not 'Trial' in self.df.columns:
@@ -365,10 +373,11 @@ class Table:
     def _get_genotype(self):
         matdata = loadmat(os.path.join(self.path,'Acquisition_{}_F{}_C{}.mat'.format(self.day,self.fly,self.cell)))
         gntyp = matdata['acqStruct']['flygenotype'].ravel()
-        self.genotype = str(gntyp[0][0])
-        self._genotype = self.genotype.replace('.', '_')
+        self._genotype = str(gntyp[0][0])
+        self._genotype = self._genotype.replace('.', '_')
         self._genotype = self._genotype.replace('>', '_')
-
+        self._genotype = self._genotype.replace('/', '_')
+        return self._genotype
 
     # ---------------------------------------------------------
     # Dunder Methods
@@ -393,4 +402,9 @@ class Table:
 for name in dir(table_plotters):
     obj = getattr(table_plotters, name)
     if isinstance(obj, types.FunctionType) and name.startswith("plot_"):
+        setattr(Table, name, obj)
+
+for name in dir(probe_movie_maker):
+    obj = getattr(probe_movie_maker, name)
+    if isinstance(obj, types.FunctionType) and name.startswith("make_"):
         setattr(Table, name, obj)
