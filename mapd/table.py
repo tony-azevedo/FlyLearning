@@ -3,7 +3,8 @@ from .helpers import get_day_fly_cell, get_file
 # from .table_plotters import plot_some_trials, plot_outcomes, plot_probe_distribution, probe_position_heatmap
 import types
 from . import table_plotters
-from . import probe_movie_maker
+from . import table_movie_maker
+from . import table_export_methods
 from .trial import Trial
 import os
 import subprocess
@@ -404,7 +405,12 @@ for name in dir(table_plotters):
     if isinstance(obj, types.FunctionType) and name.startswith("plot_"):
         setattr(Table, name, obj)
 
-for name in dir(probe_movie_maker):
-    obj = getattr(probe_movie_maker, name)
+for name in dir(table_movie_maker):
+    obj = getattr(table_movie_maker, name)
     if isinstance(obj, types.FunctionType) and name.startswith("make_"):
         setattr(Table, name, obj)
+
+for name in dir(table_export_methods):
+    obj = getattr(table_export_methods, name)
+    if isinstance(obj, types.FunctionType) and name.startswith("export_"):
+        setattr(Table, name, obj)   
