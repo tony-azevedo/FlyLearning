@@ -50,23 +50,12 @@ def pyas_state(df):
 
 class Table:
     """
-    Trial represents a trial from the FlySoundAcquisition software.
-
-    For now, trials are saved in the old format, not as h5 files, and the data has to be loaded with scipy
-
-    Attributes:
-    -----------
-    keys : list
-        list of 
-
-    Methods:
-    --------
-    greet() -> str:
-        Returns a greeting message including the name of the entity.
+    Table represents a set of trials from the FlySoundAcquisition software.
     """
 
     def __init__(self,fn,fig_folder='./figpanels'):
         self.topdir = 'D:\\Data'
+        self.topdir = 'C:\\Users\Tony\Data'
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
         self.fn = get_file(fn)
