@@ -1,4 +1,4 @@
-from .helpers import get_day_fly_cell, get_file
+from .helpers import get_day_fly_cell, get_file, default_data_directory
 from os.path import join
 import h5py
 import numpy as np
@@ -27,7 +27,7 @@ class Trial:
 
 
     def __init__(self,fn):
-        self.topdir = 'D:\\Data'
+        self.topdir = default_data_directory(verbose=False)
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
         self.fn = get_file(fn)
@@ -290,7 +290,7 @@ class Trial:
         """Work Done Against the Spring"""
         t = self.time[self.downsample_probe]
         power = self.probe_power()
-        work = np.trapz(power,t)
+        work = np.trapezoid(power,t)
         return work
 
 
@@ -299,14 +299,14 @@ class Trial:
         t = self.time[self.downsample_probe]
         x = self.probe_position[self.downsample_probe].squeeze()
         U = 0.5 * k_spring_constant * x**2
-        holding_cost = np.trapz(U, t)
+        holding_cost = np.trapezoid(U, t)
         return holding_cost
 
 
     def probe_positive_effort(self):
         power = self.probe_power()
         t = self.time[self.downsample_probe]
-        effort = np.trapz(np.clip(power, a_min=0, a_max=None), t)
+        effort = np.trapezoid(np.clip(power, a_min=0, a_max=None), t)
         return effort
     
 
@@ -315,7 +315,7 @@ class Trial:
         x = self.probe_position[self.downsample_probe].squeeze()
         t = self.time[self.downsample_probe]
         v = self.probe_velocity()
-        effort = np.trapz(alpha * v**2 + beta * x**2, t)
+        effort = np.trapezoid(alpha * v**2 + beta * x**2, t)
         return effort
 
 

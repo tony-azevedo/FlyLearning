@@ -4,9 +4,23 @@ import re
 
 
 def get_path(filename):
-    default_directory = 'd:\\Data\\'
+    default_directory = default_data_directory()
     directory_path = path.dirname(filename)
     return directory_path if directory_path else default_directory
+
+
+def default_data_directory(verbose=True):
+    possible_paths = [
+        r"D:\Data", 
+        r"C:\Users\Tony\Data"
+        ]
+    
+    for p in possible_paths:
+        if path.isdir(p):
+            if verbose: print(f"Found data directory: {p}") 
+            return p
+
+    raise FileNotFoundError("No valid data directory found in expected locations.")
 
 
 def get_file(filename):

@@ -1,5 +1,5 @@
 from scipy.io import loadmat
-from .helpers import get_day_fly_cell, get_file
+from .helpers import get_day_fly_cell, get_file, default_data_directory
 # from .table_plotters import plot_some_trials, plot_outcomes, plot_probe_distribution, probe_position_heatmap
 import types
 from . import table_plotters
@@ -54,8 +54,7 @@ class Table:
     """
 
     def __init__(self,fn,fig_folder='./figpanels'):
-        self.topdir = 'D:\\Data'
-        self.topdir = 'C:\\Users\Tony\Data'
+        self.topdir = default_data_directory(verbose=True)
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
         self.fn = get_file(fn)
