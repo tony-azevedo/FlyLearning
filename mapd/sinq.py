@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import pandas as pd
 from .helpers import get_day_fly_cell, get_file, default_data_directory
 from .table import Table  # Assuming Table is defined in table.py
@@ -6,8 +7,9 @@ from .table import Table  # Assuming Table is defined in table.py
 
 class Sinq(object):
     def __init__(self, **kwargs):
-        self.sinqname = kwargs.get('sinqname', 'all_tables')
-        self.file_location = default_data_directory()
+        self.sinqname = kwargs.get('sinqname', 'all_Tables')
+        self.file_location = os.path.join(default_data_directory(),'Sinqs')
+        os.makedirs(self.file_location, exist_ok=True)
         self.file_name = os.path.join(self.file_location, self.sinqname + '.pkl')
         self.T = None
         self.load_sinq()
@@ -22,7 +24,8 @@ class Sinq(object):
             
     
     def save(self):
-        """Save the DataFrame to the file."""
+        """Save the DataFrame to the file. remove tables first"""
+
         if self.df is not None:
             self.df.to_pickle(self.file_name)
         else:
@@ -50,20 +53,22 @@ class Sinq(object):
                 print(f"Table for {dayflycell} already exists.")
             return
         else:
-            raise ValueError("Data must be a Table, string, or None.")
+            raise ValueError("Data must be a Table or string. Cannot be none")
         
         if self.df is None:
-            raise ValueError("DataFrame is not initialized. Call load_sinq() first.")
-            self.df = pd.DataFrame()
-        if dayflycell not in self.df.index:
-            self.df.loc[dayflycell] = [None] * len(self.df.columns)
+            # Make a simple DataFrame with the genotype as a column
+            row_data = {'parquet': self.T.parquet,'Table': self.T,'genotype': self.T.genotype}
+            self.df = pd.DataFrame([row_data], index=[dayflycell])
 
-        self.df.at[dayflycell, 'parquet'] = os.path.join(self.T.path,self.T.fn)
+        elif dayflycell not in self.df.index:
+            self.df.loc[dayflycell] = [np.nan] * len(self.df.columns)
+
+        self.df.at[dayflycell, 'parquet'] = os.path.join(self.T.path,self.T.parquet)
         for col in self.T.df.columns:
             if hasattr(self.T, col) and callable(getattr(self.T, col)):
                 self.df.at[dayflycell, col] = getattr(self.T, col)()
             else:
-                self.df.at[dayflycell, col] = None
+                self.df.at[dayflycell, col] = np.nan
         
         self.save()
 
@@ -74,17 +79,25 @@ class Sinq(object):
         If the DataFrame is None, initialize it first.
         """
         if self.df is None:
-            raise ValueError("DataFrame is not initialized. Call load_sinq() first.")
+            raise ValueError("DataFrame is not initialized. Call add_table() first.")
         
         if column_name in self.df.columns:
             raise ValueError(f"Column '{column_name}' already exists in the DataFrame.")
         
-        if self.T is None:
-            self.T = Table(self.df['parquet'].iloc[0])
-        if hasattr(self.T, column_name) and callable(getattr(self.T, col)):
-            self.df.at[dayflycell, col] = getattr(self.T, col)()
+        for dayflycell in self.df.index:
+            self.T = self.df['Table'].loc[dayflycell]
+            if self.T is None:
+                self.T = Table(self.df['parquet'].iloc[0])
+                self.df.at[dayflycell, 'Table'] = self.T
+
+            if hasattr(self.T, column_name) and callable(getattr(self.T, column_name)):
+                day,fly,cell = get_day_fly_cell(self.T)
+                dayflycell = f'{day}_F{fly}_C{cell}'
+
+                self.df.at[dayflycell, column_name] = getattr(self.T, column_name)()
+                
             else:
-                self.df.at[dayflycell, col] = None
+                self.df.at[dayflycell, column_name] = np.nan
 
         self.save()
 

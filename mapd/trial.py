@@ -6,6 +6,13 @@ from matplotlib import pyplot as plt
 import pandas as pd
 from scipy.stats import mode
 
+import matplotlib as mpl
+mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
+mpl.rcParams['pdf.fonttype'] = 42         # embed fonts as text, not paths
+mpl.rcParams['svg.fonttype'] = 'none'     # keep text editable in SVG
+mpl.rcParams['font.family'] = 'Arial'
+mpl.rcParams['font.size'] = 11
+
 k_spring_constant = 0.0829 #uN/um
 
 class Trial:
@@ -103,7 +110,7 @@ class Trial:
         if self._as_outcome is None:
             if not rerun:
                 if 'current_as_outcome' in self.groups:
-                    self._as_outcom = self.current_as_outcome.decode('utf-8')
+                    self._as_outcome = self.current_as_outcome.decode('utf-8')
                     return self._as_outcome
                 else:
                     self._classify_as_outcome(rerun=rerun)
@@ -237,6 +244,7 @@ class Trial:
             self._write_string_to_hdf5('current_as_outcome',self._as_outcome)
         else:
             raise KeyError('Is the current as outcome correct?')
+
 
     ## Compute functions, using the downsampled probe
     def probe_velocity(self):

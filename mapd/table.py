@@ -6,6 +6,12 @@ from . import table_plotters
 from . import table_movie_maker
 from . import table_export_methods
 from .trial import Trial
+
+import importlib
+importlib.reload(table_plotters)
+importlib.reload(table_movie_maker)
+importlib.reload(table_export_methods)
+
 import os
 import subprocess
 import pandas as pd
@@ -19,6 +25,13 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 # from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 import seaborn as sns
+
+import matplotlib as mpl
+mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
+mpl.rcParams['pdf.fonttype'] = 42         # embed fonts as text, not paths
+mpl.rcParams['svg.fonttype'] = 'none'     # keep text editable in SVG
+mpl.rcParams['font.family'] = 'Arial'
+mpl.rcParams['font.size'] = 11
 
 
 _outcomes_dict = {
@@ -57,7 +70,7 @@ class Table:
         self.topdir = default_data_directory(verbose=True)
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
-        self.fn = get_file(fn)
+        self.parquet = get_file(fn)
 
         self.fig_folder = fig_folder
         os.makedirs(self.fig_folder, exist_ok=True)
@@ -76,6 +89,7 @@ class Table:
         
         self._genotype = None
         
+        self.ppdf = None  # probe positions dataframe
         self.hmdf = None
 
 
@@ -165,6 +179,9 @@ class Table:
         
         if df is None:
             df = self.df
+            if not self.ppdf is None:
+                print('Using existing probe positions dataframe')
+                return self.ppdf            
 
         def get_probe_positions(row):
             trial = row.Trial
@@ -178,12 +195,14 @@ class Table:
                     'probe_zero': trial.params['probeZero'],
                     }
         
-        ppdf = df.swifter.progress_bar(False).apply(get_probe_positions, axis=1, result_type='expand')
+        ppdf = df.swifter.progress_bar(True).apply(get_probe_positions, axis=1, result_type='expand')
         if ppdf.index.equals(self.df.index):
             self.df['probe_min'] = ppdf['probe_min']
             self.df['probe_max'] = ppdf['probe_max']
             self.df['probe_zero'] = ppdf['probe_zero']
 
+        self.ppdf = ppdf
+        print('Probe positions dataframe created with {} trials'.format(len(ppdf)))
         return ppdf
 
 
@@ -228,6 +247,46 @@ class Table:
 
         self.hmdf = pd.DataFrame(probe_positions['probe_positions'].apply(lambda a: a.ravel()).to_list(), index=probe_positions.index, columns=ds_trtime)
         return self.hmdf
+
+
+    def probe_position_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=None,index=None,savefig=False,format=None):
+
+        if index is None:
+            index = self.df.index
+
+        filtered_df = self.df.loc[index]
+        if not filter is None:
+            # for key in filter:
+            #     probe_positions.loc[ppi,key] = self.df.loc[ppi,key]
+            for key in filter:
+                filtered_df = filtered_df.loc[filtered_df[key]==filter[key],:]
+
+        if bin_min is None:
+            ValueError('bin_min must be specified') # bin_min = probe_positions.probe_min.min() # Max flexion
+        if bin_max is None:
+            ValueError('bin_max must be specified') # bin_max = probe_positions.probe_max.max() # Should be ProbeZero
+        probe_bins = np.arange(bin_min, bin_max, binwidth)
+
+        def trial_probe_position_ds(row):
+            trial = row.Trial
+            if any(trial.probe_position>1000):
+                trial.exclude(reason='probe values too high')
+                ValueError('Have to exclude trial, probe is too high, rerun')
+            pps = trial.probe_position - trial.params['probeZero']
+            pps = pps[row.Trial.downsample_probe]
+
+            counts, _ = np.histogram(pps, bins=probe_bins)
+            # return counts, len(pps)
+            return {'counts': counts,
+                    'N': len(pps)
+                    }
+
+        print('Calculating downsampled probe positions')
+        counts_per_bin = filtered_df.swifter.progress_bar(True).apply(trial_probe_position_ds, axis=1, result_type='expand')
+        stacked_counts = np.stack(counts_per_bin['counts'].values)
+        total_counts = np.sum(stacked_counts, axis=0)
+        total_N = np.sum(counts_per_bin['N'].values)
+        return total_counts, total_N, probe_bins
 
     
     def add_df_category(self, category, trial_min=None, trial_max=None, trial_index=None, categories=None):
@@ -327,7 +386,7 @@ class Table:
     # Helper (Internal) Methods
     # ---------------------------------------------------------
     def _load_parquet(self):
-        self.df = pd.read_parquet(os.path.join(self.path,self.fn))
+        self.df = pd.read_parquet(os.path.join(self.path,self.parquet))
 
         self.df['trial'] = self.df['trial'].astype(int)
         self.df.rename(columns={'trial': 'trial_number'}, inplace=True)
@@ -339,7 +398,7 @@ class Table:
             # Convert MATLAB datenum to Python datetime
             return datetime(1970, 1, 1) + timedelta(days=(matlab_datenum - offset))
         self.df['timestamp'] = self.df['timestamp'].apply(matlab_datenum_to_datetime)
-        print('T = pd.read_parquet("{}")'.format(os.path.join(self.path,self.fn).replace('\\','\\\\')))
+        print('T = pd.read_parquet("{}")'.format(os.path.join(self.path,self.parquet).replace('\\','\\\\')))
         # print(self.df['samples'])
         try:
             self.df = self.df[self.df['samples'].apply(lambda x: x.size > 0)]
@@ -348,7 +407,7 @@ class Table:
 
 
     def _trial_file_name_template(self):
-        original_filename = self.fn
+        original_filename = self.parquet
         parts = original_filename.split('_')
         parts.insert(1, "Raw")
         parts[-1] = parts[-1].replace("Table.parquet", "{x}.mat")
@@ -377,7 +436,7 @@ class Table:
     
 
     def __repr__(self):
-        return('Day {}, F{}, C{}: {}'.format(self.day,self.fly,self.cell,self.fn))
+        return('Day {}, F{}, C{}: {}'.format(self.day,self.fly,self.cell,self.parquet))
     
 
 

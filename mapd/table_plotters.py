@@ -9,12 +9,21 @@ import pandas as pd
 import swifter
 import numpy as np
 from datetime import datetime, timedelta
+
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
 
 import seaborn as sns
 from functools import wraps
+
+import matplotlib as mpl
+mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
+mpl.rcParams['pdf.fonttype'] = 42         # embed fonts as text, not paths
+mpl.rcParams['svg.fonttype'] = 'none'     # keep text editable in SVG
+mpl.rcParams['font.family'] = 'Arial'
+mpl.rcParams['font.size'] = 11
+
 
 # _force_clrs = [(.92, .6, .7),(1,.9,1)]
 _force_clrs = [
@@ -264,7 +273,7 @@ def plot_some_phys(self,index=None,from_zero=False,ax=None,savefig=False,format=
 def plot_outcomes(self,savefig=False,format='png'):
     # Plot each row as a vertical tick mark at its categorical position
     
-    fig = Figure(figsize=(6.4, 0.64), dpi=200)
+    fig = Figure(figsize=(6.4, 6.4), dpi=200)
     canvas = FigureCanvas(fig)
     ax = fig.add_subplot(1, 1, 1)
     
@@ -381,37 +390,15 @@ def plot_outcomes(self,savefig=False,format='png'):
     return fig, ax
 
 
-def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=None,index=None,savefig=False,format=None):
+def plot_probe_distribution(self,*args, **kwargs):
     from collections import Counter
-
-    if index is None:
-        index = self.df.index
-    probe_positions = self.probe_positions_df(self.df.loc[index])
-    probe_positions = self.downsample_probe_df(probe_positions)
-
-    if bin_min is None:
-        bin_min = probe_positions.probe_min.min() # Max flexion
-    if bin_max is None:
-        bin_max = probe_positions.probe_max.max() # Should be ProbeZero
-    probe_bins = np.arange(bin_min, bin_max, binwidth)
-
-    ppi = probe_positions.index
-    if not filter is None:
-        for key in filter:
-            probe_positions.loc[ppi,key] = self.df.loc[ppi,key]
-
-        for key in filter:
-            probe_positions = probe_positions.loc[probe_positions[key]==filter[key],:]
-
-    # print('Histogram for {} rows'.format(probe_positions.shape[0]))
-
-    # Define a function to calculate the histogram
-    def calculate_histogram(array, bins):
-        counts, _ = np.histogram(array, bins=bins)
-        return counts
     
-    probe_positions['histogram'] = probe_positions['probe_positions'].apply(lambda arr: calculate_histogram(arr, probe_bins))
-    summed_histogram = np.sum(np.vstack(probe_positions['histogram'].to_numpy()), axis=0)
+    total_counts = kwargs.get('total_counts', None)
+    total_N = kwargs.get('total_N', self.df.index)
+    probe_bins = kwargs.get('probe_bins', None)
+
+    if total_counts is None:
+        total_counts, total_N, probe_bins = self.probe_position_distribution(*args, **kwargs)
 
     target_tuples = list(zip(self.df.pyasXPosition-self.df.probeZero, self.df.pyasWidth, self.df.pyasState))
     most_common_tuples = Counter(target_tuples).most_common(2)
@@ -426,7 +413,7 @@ def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=Non
         tgt_clr = _force_clrs[0 if mct[2]=='lo' else 1]
         rect = patches.Rectangle(
                 (0, mct[0]),        # Bottom-left corner of the rectangle
-                (summed_histogram.max()),       # Width (covers the specified rows)
+                (total_counts.max()),       # Width (covers the specified rows)
                 mct[1],                        # Height (covers all categories)
                 edgecolor=tgt_clr,
                 facecolor=tgt_clr,
@@ -434,39 +421,40 @@ def plot_probe_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=Non
             )
         ax.add_patch(rect)
 
-    ax.step(summed_histogram, probe_bins[:-1], where='post', color='blue', label='Histogram')
+    ax.step(total_counts, probe_bins[:-1], where='post', color='blue', label='Histogram')
     
     ax.set_xlabel('Probe Position')
     ax.set_ylabel('Frequency')
     ax.grid(True, alpha=0.5)
 
-    if not filter is None:
+    filter_val = kwargs.get('filter', None)
+    index = kwargs.get('index', self.df.index)
+    fmt = kwargs.get('fmt', None)
+
+    if not filter_val is None:
         titl = '{flk} ({idx})'.format(
-                    dfc = self._dfc,
-                    gno = self._genotype,
-                    flk = ', '.join([filter[key] for key in filter.keys()]),
-                    idx = '-'.join([f'{probe_positions.index[0]}', f'{probe_positions.index[-1]}']),
-                    fmt = format)
+                    flk = ', '.join([filter_val[key] for key in filter_val.keys()]),
+                    idx = '-'.join([f'{index[0]}', f'{index[-1]}']))
     else: titl = ''
     ax.set_title(f'Probe: {titl}')
     print(titl)
 
-    if savefig or (not format is None):
-        format = format or 'png'
-        if not filter is None:
-            fig.savefig('{self.fig_folder}/{dfc}_{gno}_probe_dist_{flk}_{idx}.{fmt}'.format(
+    if not fmt is None:
+        fmt = fmt or 'png'
+        if not filter_val is None:
+            figname = '{ff}/{dfc}_{gno}_probe_dist_{flk}_{idx}.{fmt}'.format(
+                        ff = self.fig_folder,
                         dfc = self._dfc,
                         gno = self._genotype,
-                        flk = '_'.join([filter[key] for key in filter.keys()]),
-                        idx = '_'.join([f'{probe_positions.index[0]}', f'{probe_positions.index[-1]}']),
-                        fmt = format),
-                        format=format)
-            return
+                        flk = '_'.join([filter_val[key] for key in filter_val.keys()]),
+                        idx = '_'.join([f'{index[0]}', f'{index[-1]}']),
+                        fmt = fmt)
+            print(f'Saving figure: {figname}')
+            fig.savefig(figname)
+            return fig, ax
         else:
-            fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_probe_dist_all.{format}',format=format)
-            return
-        
-    return fig, ax
+            fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_probe_dist_all.{fmt}',format=format)
+            return fig, ax
 
 
 def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=None,cmax=None):
