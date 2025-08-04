@@ -2,9 +2,13 @@ from .helpers import get_day_fly_cell, get_file, default_data_directory
 from os.path import join
 import h5py
 import numpy as np
-from matplotlib import pyplot as plt
+# from matplotlib import pyplot as plt
 import pandas as pd
 from scipy.stats import mode
+
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.patches as patches
 
 import matplotlib as mpl
 mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
@@ -51,6 +55,7 @@ class Trial:
             if '#refs#' in hdf5_file:
                 self._refs = self._load_refs(hdf5_file['#refs#'])
 
+        self.total_duration = self.params['samples'] / self.params['sampratein']
         self._time = None
         self._trialtime = None
         self._downsample_probe = None
@@ -172,8 +177,8 @@ class Trial:
         trial_dur =  self.params['preDurInSec'] + self.params['stimDurInSec'] + self.params['postDurInSec'] 
         trialsamps = trial_dur*samprate
 
-        total_dur = samples / samprate
-        self._time = np.linspace(-pre_dur, total_dur - pre_dur, np.int64(samples))
+        self._total_duration = samples / samprate
+        self._time = np.linspace(-pre_dur, self._total_duration - pre_dur, np.int64(samples))
         self._trialtime = np.linspace(-pre_dur, trial_dur - pre_dur, np.int64(trialsamps))
 
 
@@ -244,6 +249,25 @@ class Trial:
             self._write_string_to_hdf5('current_as_outcome',self._as_outcome)
         else:
             raise KeyError('Is the current as outcome correct?')
+
+
+    def on_target(self, probe_position=None):
+        """
+        How much of the duration is the probe on the target.
+        This is a helper function to quantify how much the probe is on the target during the trial.
+        Args:
+            probe_position (np.ndarray): The probe position data. If None, uses self.probe_position.
+        
+        Returns:
+            float: The fraction of time the probe is on the target.
+        """
+        if probe_position is None:
+            probe_position = self.probe_position.ravel()
+        
+        target_min = self.params['pyasXPosition']
+        target_max = self.params['pyasXPosition'] + self.params['pyasWidth']
+        
+        return np.sum((probe_position >= target_min) & (probe_position <= target_max))/ len(probe_position)
 
 
     ## Compute functions, using the downsampled probe
@@ -366,40 +390,42 @@ class Trial:
         arduino_output = -arduino_output*target_width + target_y + target_width
 
         # Plot
-        plt.figure()
-        plt.gca().add_patch(plt.Rectangle(
+        fig = Figure(figsize=(6, 6), dpi=200)
+        canvas = FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+
+        ax.add_patch(patches.Rectangle(
             (time_array[0], target_y),  # Bottom-left corner
             width=max(time_array) - min(time_array),  # Full time range
             height=target_width,  # Width of the target
             color=tgt_clr, alpha=0.3, label='Target'))
-        plt.plot(time_array, arduino_output,color=(0.7,0.7,0.7),label='arduino_output')
+        ax.plot(time_array, arduino_output,color=(0.7,0.7,0.7),label='arduino_output')
 
-        plt.plot(time_array, probe_position)
-        plt.title(f"tr#={int(self.params['trial'])} probe_position: '{self.as_outcome}'")
-        plt.xlabel("Time (s)")
-        plt.ylabel("um")
-        plt.xlim(time_array[0], time_array[-1])
+        ax.plot(time_array, probe_position)
+        ax.set_title(f"tr#={int(self.params['trial'])} probe_position: '{self.as_outcome}'")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("um")
+        ax.set_xlim(time_array[0], time_array[-1])
         if not from_zero:
             if not use_full_y:
-                plt.ylim([self.params['probeZero'] - 500, self.params['probeZero'] + 20])
+                ax.set_ylim([self.params['probeZero'] - 500, self.params['probeZero'] + 20])
             else:
-                plt.ylim([0, 1280])
-            plt.axhline(y=self.params['probeZero'], xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+                ax.set_ylim([0, 1280])
+            ax.axhline(y=self.params['probeZero'], xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
 
         else:
             if not use_full_y:
-                plt.ylim([0 - 500, 0 + 20])
+                ax.set_ylim([0 - 500, 0 + 20])
             else:
-                plt.ylim([0, 1280]-self.params['probeZero'])
-            plt.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
-
-        # plt.grid(True)
-        plt.show()
+                ax.set_ylim([0, 1280]-self.params['probeZero'])
+            ax.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
 
         if savefig or (not format is None):
             format = format or 'png'
-            plt.savefig(f'./figpanels/{self._dfc}_Trial_{self.params['trial']}_probe_plot.{format}',format=format)
+            fig.savefig(f'./figpanels/{self._dfc}_Trial_{self.params['trial']}_probe_plot.{format}',format=format)
 
+        return fig, ax
+    
 
     def _plot_ephys_groups(self,group_name,use_full_time=True):           # Additional plot for probe_position
         data = getattr(self,group_name,None)

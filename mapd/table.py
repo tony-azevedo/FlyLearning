@@ -5,6 +5,7 @@ import types
 from . import table_plotters
 from . import table_movie_maker
 from . import table_export_methods
+from . import table_scalars
 from .trial import Trial
 
 import importlib
@@ -45,6 +46,7 @@ _outcomes_dict = {
     'rest': 'rest trial',
     'info': 'info',
 }
+
 _outcomes_cat =             pd.api.types.CategoricalDtype(categories=_outcomes_dict.keys(), ordered=True)
 _pyas_state_cat =                     pd.api.types.CategoricalDtype(categories=['lo','hi'], ordered=True)
 _vnc_status_cat =           pd.api.types.CategoricalDtype(categories=['intact','cut'], ordered=True)
@@ -75,6 +77,19 @@ class Table:
         self.fig_folder = fig_folder
         os.makedirs(self.fig_folder, exist_ok=True)
         
+        self.progress_bar = True  # Set to False to disable progress bar in swifter
+        self._outcomes_dict = {
+            'no_as_no_mv': 'no aversive stimulus, no movement',
+            'no_as_mv': 'no aversive stimulus, probe moves',
+            'as_off': 'fly turns off aversive stimulus during trial',
+            'as_off_late': 'fly turns off aversive stimulus in intertrial period',
+            'timeout_fail': 'aversive stimulus never turned off and the probe was more flexed than the target',
+            'timeout': 'aversive stimulus never turned off, no movement',
+            'probe': 'probe_trial',
+            'rest': 'rest trial',
+            'info': 'info',
+        }
+        
         self.flycelldir = self.day + '_F' + str(self.fly) + '_C' + str(self.cell)
         self.path = os.path.join(self.topdir,self.day,self.flycelldir)
 
@@ -94,7 +109,7 @@ class Table:
 
 
     @property
-    def trial_list(self):
+    def trial_series(self):
         if not 'Trial' in self.df.columns:
             self.get_trials()
         return self.df['Trial']
@@ -134,42 +149,43 @@ class Table:
 
     def get_trials(self):
         if 'Trial' in self.df.columns:
-            return self.df.loc[:,['Trial','is_rest','is_probe','as_duration','as_outcome','op_cnd_blocks','pyasState']]
+            return self.df['Trial']
 
         def create_trial(row):
             trial_number = row.name  # Use the index (trial_number)
             file_name = self._generate_filename(trial_number)
-            tr = Trial(file_name)
-            try: 
-                trial_dict = {
-                'Trial':    tr,
-                'is_rest':  tr.is_rest,
-                'is_probe':  tr.is_probe,
-                'as_duration':  tr.as_duration,
-                'as_outcome':  tr.as_outcome,
-                }
-            except ValueError as e:
-                print(f'{tr}: ',e)
-                trial_dict = {
-                    'Trial':    tr,
-                    'is_rest':  None,
-                    'is_probe':  None,
-                    'as_duration':  None,
-                    'as_outcome':  None,
-                    }
-
-            return trial_dict
+            return Trial(file_name)
         
         print('Getting trials')
-        new_cols = self.df.swifter.apply(create_trial,axis=1,result_type='expand')
-        new_cols['as_outcome'] = new_cols['as_outcome'].astype(_outcomes_cat)
+        self.df['Trial'] = self.df.swifter.progress_bar(self.progress_bar).apply(create_trial,axis=1,result_type='expand')
+        return self.df['Trial']
         
-        # numbering blocks where learning is engaged.
-        self.df = self.df.join(new_cols)
-        self.df['op_cnd_blocks'] = (self.df['pyasState'] != self.df['pyasState'].shift(1)).cumsum()
-        self.df['pyasState'] = self.df['pyasState'].astype(_pyas_state_cat)
-        return new_cols
+
+    def add_trial_properties(self,prop_list=['total_duration','is_rest','is_probe','as_duration','as_outcome'],rerun=False):
+        """ Compute properties for each trial and add them to the DataFrame.
+        """
+        def compute_property(tr, prop, rerun=False):
+            if not hasattr(tr, prop):
+                raise ValueError(f"Trial object does not have a property called '{prop}'")
+            if callable(getattr(tr, prop)):
+                return getattr(tr, prop)(rerun=rerun)
+            else:
+                return getattr(tr, prop)
+
+        for prop in prop_list:
+            print('Computing trial {}'.format(prop))
+            self.df[prop] = self.df['Trial'].swifter.progress_bar(self.progress_bar).apply(lambda tr: compute_property(tr, prop))
+            
+            if prop == 'as_outcome':
+                # Convert to categorical type
+                self.df['as_outcome'] = self.df['as_outcome'].astype(_outcomes_cat)
+
+        if 'op_cnd_blocks' not in self.df.columns:
+            self.df['op_cnd_blocks'] = (self.df['pyasState'] != self.df['pyasState'].shift(1)).cumsum()
+            self.df['pyasState'] = self.df['pyasState'].astype(_pyas_state_cat)
         
+        return self.df[prop_list]
+    
 
     def probe_positions_df(self,df=None):
         # Collect a dataframe of trial information
@@ -194,8 +210,8 @@ class Table:
                     'probe_max': pps.max(),  # Should be close to ProbeZero
                     'probe_zero': trial.params['probeZero'],
                     }
-        
-        ppdf = df.swifter.progress_bar(True).apply(get_probe_positions, axis=1, result_type='expand')
+
+        ppdf = df.swifter.progress_bar(self.progress_bar).apply(get_probe_positions, axis=1, result_type='expand')
         if ppdf.index.equals(self.df.index):
             self.df['probe_min'] = ppdf['probe_min']
             self.df['probe_max'] = ppdf['probe_max']
@@ -282,7 +298,7 @@ class Table:
                     }
 
         print('Calculating downsampled probe positions')
-        counts_per_bin = filtered_df.swifter.progress_bar(True).apply(trial_probe_position_ds, axis=1, result_type='expand')
+        counts_per_bin = filtered_df.swifter.progress_bar(self.progress_bar).apply(trial_probe_position_ds, axis=1, result_type='expand')
         stacked_counts = np.stack(counts_per_bin['counts'].values)
         total_counts = np.sum(stacked_counts, axis=0)
         total_N = np.sum(counts_per_bin['N'].values)
@@ -341,8 +357,8 @@ class Table:
         """Compute a function on the trial object and add to the df"""
         if not hasattr(self.df[trial_col].iloc[0], method_name):
             raise AttributeError(f"Trial objects do not have a method called '{method_name}'")
-        
-        self.df[method_name] = self.df[trial_col].apply(lambda trial: getattr(trial,method_name)())
+
+        self.df[method_name] = self.df[trial_col].swifter.progress_bar(self.progress_bar).apply(lambda trial: getattr(trial,method_name)())
 
 
     def open_notes_files(self):
@@ -381,6 +397,81 @@ class Table:
         subdf['Trial'].apply(lambda tr: tr.exclude(reason=reason))
         self.exclude_trials()
 
+
+    def find_successful_trials(self):
+        """
+        A successful trial is a trial where the fly enters the target and stays at least 2 trials.
+        """
+        if 'as_outcome' not in self.df.columns:
+            self.add_trial_properties(prop_list=['as_outcome'])
+        
+        if 'on_target' not in self.df.columns:
+            self.add_trial_properties(prop_list=['on_target'])
+
+        as_off = (self.df['as_outcome'] == 'as_off') | (self.df['as_outcome'] == 'as_off_late')
+        no_as = (self.df['as_outcome'] == 'no_as_no_mv') | (self.df['as_outcome'] == 'no_as_mv')
+        rest = (self.df['as_outcome'] == 'rest')
+        probe = (self.df['as_outcome'] == 'probe')
+
+        on_target = ((self.df['on_target']>.9) & rest) | ((self.df['on_target']>.9) & probe)
+
+        # take as_off trials. Ask if the next two trials are either no_as or on_target
+        no_as_1 = no_as.shift(-1) | on_target.shift(-1)
+        no_as_2 = no_as.shift(-2) | on_target.shift(-2)
+        self.df['success'] = as_off & no_as_1 & no_as_2
+
+    
+    def classify_successful_trials(self):
+        """ Classify successful trials into settle or enter.
+        """
+
+        self.df['success_type'] = 'unsuccessful'
+
+        if 'next_trial' not in self.df.columns:
+            self.df['next_trial'] = self.df['Trial'].shift(-1)
+
+        def classify_success(row):
+            if row['success']:
+                tr1 = row['Trial']
+                tr2 = row['next_trial']
+                
+                state = 'lo' if tr1.pyasState == 'lo' else 'hi'
+                xpos = tr1.params['pyasXPosition']
+                wdth = tr1.params['pyasWidth']
+
+                
+
+                if row['next_trial'] is not None:
+                    next_pp = row['next_trial'].probe_position
+                    target = next
+
+                    if np.all(pp == next_pp):
+                        return 'successful'
+
+            else:
+                return 'unsuccessful'
+
+        self.df['success_type'] = self.df.apply(classify_success, axis=1)
+
+        if 'target_enter_side' not in self.df.columns:
+            self.add_trial_properties(prop_list=['on_target'])
+        # what kind of success?
+        self.df['success_type'] = 'unsuccessful'
+
+        # settle
+
+
+
+
+    def compute_successful_enter_trials(self):
+        """
+        Compute the number of successful enter trials.
+        """
+        if 'as_outcome' not in self.df.columns:
+            raise ValueError("DataFrame does not contain 'as_outcome' column.")
+        
+        successful_enter_trials = self.df[self.df['as_outcome'] == 'enter'].shape[0]
+        return successful_enter_trials
 
     # ---------------------------------------------------------
     # Helper (Internal) Methods
@@ -461,3 +552,8 @@ for name in dir(table_export_methods):
     obj = getattr(table_export_methods, name)
     if isinstance(obj, types.FunctionType) and name.startswith("export_"):
         setattr(Table, name, obj)   
+
+for name in dir(table_scalars):
+    obj = getattr(table_scalars, name)
+    if isinstance(obj, types.FunctionType) and name.startswith("compute_"):
+        setattr(Table, name[len("compute_"):], obj)   

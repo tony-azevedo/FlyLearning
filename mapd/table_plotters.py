@@ -187,6 +187,7 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
         ax.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
 
 
+
 @auto_ax_and_save(default_title="AS and peizo")
 def plot_some_as_piezo(self,index=None,ax=None,savefig=False,format=None):
     if index.empty:
@@ -272,6 +273,8 @@ def plot_some_phys(self,index=None,from_zero=False,ax=None,savefig=False,format=
 
 def plot_outcomes(self,savefig=False,format='png'):
     # Plot each row as a vertical tick mark at its categorical position
+    if not 'as_outcome' in self.df.columns:
+        self.add_trial_properties()
     
     fig = Figure(figsize=(6.4, 6.4), dpi=200)
     canvas = FigureCanvas(fig)
