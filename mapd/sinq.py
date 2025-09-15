@@ -2,8 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 from .helpers import get_day_fly_cell, get_file, default_data_directory
-from .table import Table  # Assuming Table is defined in table.py
-
+from mapd.table import Table
+import warnings
 
 class Sinq(object):
     def __init__(self, **kwargs):
@@ -25,6 +25,11 @@ class Sinq(object):
     
     def save(self):
         """Save the DataFrame to the file. remove tables first"""
+
+        new_file_name = os.path.join(self.file_location, self.sinqname + '.pkl')
+        if not new_file_name == self.file_name:
+            warnings.warn(f"Saving as {new_file_name} (Old file: {self.file_name})")
+            self.file_name = new_file_name
 
         if self.df is not None:
             stripped_df = self._prepare_for_export()
@@ -61,117 +66,234 @@ class Sinq(object):
         
     def add_table(self, table=None, overwrite=True):
         """
-        Add a table to the Sinq object.
-        If 'table' is a DataFrame, add it directly.
-        If 'table' is a string, create the table and analyze to add to sinq table (empty or via helper).
+        Add a table to the Sinq object, either from a Table object or a string path.
+        This is the main function for adding or updating a table.
         """
         if isinstance(table, Table):
-            # If data is a string, create a new DataFrame (customize as needed)
-            # Example: create an empty DataFrame with the string as a column
             self.T = table
             dayflycell = self.T.flycelldir
         elif isinstance(table, str):
-            # Add/replace the table as a new attribute or merge as needed
-            day,fly,cell = get_day_fly_cell(table)
+            day, fly, cell = get_day_fly_cell(table)
             dayflycell = f'{day}_F{fly}_C{cell}'
-            if (self.df is not None) and (dayflycell in self.df.index):                    
-                # Check if all values in the row are not np.nan; if so, return early
-                if not self.df.loc[dayflycell].isnull().any():
-                    print(f"Table and all computations for {dayflycell} already exists. Skipping addition.")
-                    return
-            self.T = Table(table)
+            if (self.df is not None) and (dayflycell in self.df.index):
+                # Check if values exist before adding
+                if not self.df.loc[dayflycell].apply(lambda x: isinstance(x, float) and np.isnan(x)).any():
+                    print(f"Table and all computations for {dayflycell} already exists.")
+                    if not overwrite:
+                        print('Overwrite = {}. Skipping addition.'.format(overwrite))
+                        return
+                    else:
+                        print('Overwrite: {}'.format(overwrite))
+            self.T = Table(table)  # Create new table if it's a string
         else:
             raise ValueError("Data must be a Table or string. Cannot be none")
-        
-        row_data = {
-            'parquet': self.T.parquet,
-            'Table': self.T,
-            'genotype': self.T.genotype
-        }
 
-        print(row_data)
+        # Use _add_row to handle the row addition or update
+        row_data = {
+            'parquet': table.parquet,
+            'Table': table,
+            'genotype': table.genotype
+        }
 
         if self.df is None:
             self.df = pd.DataFrame([row_data], index=[dayflycell])
-        else:
-            self.df.loc[dayflycell] = pd.Series(row_data)
-
-        for attr in self.df.columns:
-            if not attr in row_data:
-                print(f"Adding {attr} for {dayflycell}")
-                if hasattr(self.T, attr) and callable(getattr(self.T, attr)):
-                    if overwrite:
-                        self.df.at[dayflycell, attr] = getattr(self.T, attr)() 
+        elif not dayflycell in self.df.index or overwrite:
+            # If the dayflycell exists and overwrite is True, update the row with row_data
+            # Fill in the missing columns with existing values or NaN
+            for column in self.df.columns:
+                if column in row_data:
+                    self.df.loc[dayflycell, column] = row_data[column]  # Assign new data
                 else:
-                    raise ValueError('Attribute {} not found in Table {}'.format(attr, self.T))
-                    self.df.at[dayflycell, attr] = np.nan
+                    # If the column isn't in row_data, keep the existing value or set to NaN
+                    print(column)
+                    if not (isinstance(self.df.loc[dayflycell, column],str)) and np.isnan(self.df.loc[dayflycell, column]):
+                        self.df.loc[dayflycell, column] = np.nan
+
+        updated_row = self._add_row(self.df.loc[dayflycell].copy(), overwrite=overwrite)
+        self.df.loc[dayflycell] = updated_row
+
+        # After updating the row, save the Sinq object
         
+        self.df = self.df.sort_index()
         self.save()
         return self.T
 
 
-    def restore_table(self, dayflycell):
+    def _add_row(self, row, table=None, overwrite=True):
         """
-        Restore a table from the DataFrame using the dayflycell index.
-        If the table is not found, it will return None.
+        Private function to add or update a row in the DataFrame based on the provided Table object.
+        This function is called internally by add_table.
         """
-        if self.df is None or dayflycell not in self.df.index:
-            print(f"No table found for {dayflycell}.")
-            return None
-        
-        parquet_path = self.df.at[dayflycell, 'parquet']
-        if pd.isna(parquet_path):
-            print(f"No parquet path found for {dayflycell}.")
-            return None
-        
-        self.T = Table(parquet_path)
-        self.df.at[dayflycell, 'Table'] = self.T
-        return self.T
 
+        # Check if the row already exists and whether we should overwrite it
+        if not row.apply(lambda x: isinstance(x, float) and np.isnan(x)).any():
+            print(f"Table and all computations for {row.index} already exists.")
+            if not overwrite:
+                print('Overwrite = False. Skipping addition.')
+                return row  # Return the existing row if no overwrite is needed
+
+        if table is None:
+            table = row['Table']
+
+        # Update all computed attributes for the row
+        table.extract_trial_properties()
+        for attr in self.df.columns:
+            print(f"Adding {attr} for {row.name}")
+            row, attr_list = self._get_table_attr(row,attr)
+
+        # Sort the DataFrame to maintain order
+        return row  # Return the updated row
     
-    def add_column(self, column_name):
+    
+    def add_column(self, column_name, overwrite=False):
         """
         Add a column to the DataFrame.
         If the DataFrame is None, initialize it first.
         Will not compute column for other rows.
         """
+
         if self.df is None:
             raise ValueError("DataFrame is not initialized. Call add_table() first.")
         
-        if column_name in self.df.columns:
-            print(f"Column '{column_name}' already exists in the DataFrame.")
-            return
-        
         if self.T is None:
-            raise ValueError("No Table object is associated with this Sinq. Call add_table() first.")
+            raise ValueError("No Table object is associated with this Sinq. Call add_table() or restore_table() first.")
+        
+        if column_name in self.df.columns and not overwrite:
+            print(f"Column '{column_name}' already exists in the DataFrame. Call sinq.sync_column({column_name})")
+            overwrite = all(self.df[column_name].isna())
+            if not overwrite:
+                return
+        if column_name in self.df.columns and overwrite:
+            print("Overwriting existing column.")
         
         day,fly,cell = get_day_fly_cell(self.T.parquet)
         dayflycell = f'{day}_F{fly}_C{cell}'
 
-
-        if callable(getattr(self.T, column_name)):
-            returned_attr = getattr(self.T, column_name)()
+        # test if T has attribute
+        if hasattr(self.T,column_name):
+            self.df[column_name] = np.nan
+            row, attr_list = self._get_table_attr(self.df.loc[dayflycell,:].copy(),column_name)
+            self.df.loc[dayflycell] = row
+            self.save()
+            return self.df.loc[dayflycell,attr_list]
         else:
-            returned_attr = getattr(self.T, column_name, np.nan)
+            raise AttributeError('Not sure Table has attribute {}'.format(column_name))
+        
+
+    def _get_table_attr(self,row,attr):
+        """Call attr on the table"""
+
+        if 'Table' in attr:
+            return row, [attr]
+
+        if 'outcome_fractions_' in attr:
+            returned_attr = getattr(row['Table'], 'outcome_fractions')()
+            for key, value in returned_attr.items():
+                row[f"{'outcome_fractions'}_{key}"] = value
+            return row, returned_attr.items()
+
+        if callable(getattr(row['Table'], attr)):
+            returned_attr = getattr(row['Table'], attr)()
+        else:
+            returned_attr = getattr(row['Table'], attr, np.nan)
 
         if pd.api.types.is_scalar(returned_attr):
-            self.df.at[dayflycell, column_name] = returned_attr
+            row[attr] = returned_attr
+        
+        return row, [attr]
 
-        if pd.api.types.is_dict_like(returned_attr):
-            for key, value in returned_attr.items():
-                self.df.at[dayflycell, f"{column_name}_{key}"] = value
 
-        self.save()
-        return returned_attr
-
-    def sync_sinq(self, overwrite=True):
+    def sync(self, *, overwrite:bool=False) -> None:
         """
         Synchronize the current Sinq by filling in missing columns
         based on the existing Table objects in the DataFrame.
         """
+        # Count total missing values
+        print('Syncing Sinq: filling in {} empyties - {}'.format(self.df.drop(columns=['Table']).isna().sum().sum(),self.__repr__()))
+        
+        if self.df.isna().sum().sum()==0 and not overwrite:
+            print('Sinq is full, use overwrite=True to recompute')
+            return
+        
+        def re_add_table_values(row):
+            if not ((row.apply(lambda x: isinstance(x, float) and np.isnan(x))).any()) and (not overwrite):
+                if row['Table'] is not None:
+                    print('All values exist for {}'.format(row['Table']))
+                else:
+                    print('All values exist for {} except Table'.format(row['parquet']))
+                return row  # Return row unmodified if no changes are needed
 
+            if row['Table'] is not None:
+                print('Adding all values for {}'.format(row['Table']))
+                row = self._add_row(row, overwrite=overwrite)
+            else:
+                print('Restoring Table and all values for {}'.format(row['parquet']))
+                table = self.restore_table(dayflycell=row.index)
+                row = self._add_row(row, table=table, overwrite=overwrite)
+
+            return row  # Ensure the row is returned after modification
+
+        self.df = self.df.apply(re_add_table_values,axis=1)
         self.save()
 
+
+    def sync_column(self, column=None, overwrite=True):
+        """
+        Recalculate values for each row for a single column
+        """
+        if column is None or not column in self.df.columns:
+            raise KeyError('No column {} to update'.format(column))
+        
+        # Count total missing values
+        print('Syncing {}: filling in {} empyties'.format(column, self.df[column].isna().sum()))
+        
+        if self.df[column].isna().sum()==0 and not overwrite:
+            print("Sinq.df['{}] is full, use overwrite=True to recompute".format(column))
+            return
+        
+        def re_add_table_values(row: pd.Series):
+            if row['Table'] is None:
+                print('Restoring Table and all values for {}'.format(row['parquet']))
+                table = self.restore_table(dayflycell=row.name)
+                row['Table'] = table
+            row, attr_list = self._get_table_attr(row,column)
+            return row  # Ensure the row is returned after modification
+
+        self.df = self.df.apply(re_add_table_values,axis=1)
+        self.save()
+
+
+    def restore_table(self, dayflycell=None):
+        """
+        Restore a table from the DataFrame using the dayflycell index.
+        If the table is not found, it will return None.
+        """
+        if dayflycell is None and self.df is None:
+            raise KeyError('Sinq has no Tables, nothing to restore')
+        elif dayflycell is None:
+            dayflycell = self.df.index[0]
+            print('Restoring first table: '.format(dayflycell))
+        
+        def make_table(parquet_path):
+            if pd.isna(parquet_path):
+                raise KeyError('parquet_path is empty')
+            T = Table(parquet_path)
+            return T
+
+        if dayflycell == 'All' or dayflycell == 'all':
+            print('Restoring all tables: {}'.format(self.df.index.tolist() if self.df is not None else [],))
+            self.df['Table'] = self.df['parquet'].apply(make_table)
+            self.T = self.df['Table'][0]
+        elif self.df is None or dayflycell not in self.df.index:
+            print(f"No table found for {dayflycell}.")
+            return None
+        else:
+            parquet_path = self.df.at[dayflycell, 'parquet']
+            self.T = make_table(parquet_path=parquet_path)
+            self.df.at[dayflycell, 'Table'] = self.T
+
+        return self.T
+    
 
     def merge_sinq(self, other_sinq):
         """
@@ -197,9 +319,16 @@ class Sinq(object):
         )
     
     def __repr__(self):
+        if self.df is not None:
+            df_no_table = self.df.drop(columns=['Table'])
+
+            # Count total missing values
+            missing_count = df_no_table.isna().sum().sum()
+        else:
+            missing_count = 0
         repr_str = "{}: {} empties; {} x {} ".format(
             self.__str__(),
-            self.df.isna().sum().sum() if self.df is not None else 0,
+            missing_count,
             self.df.index.tolist() if self.df is not None else [],
             self.df.columns.tolist() if self.df is not None else []
         )

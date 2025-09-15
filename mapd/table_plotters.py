@@ -15,6 +15,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
 
 import seaborn as sns
+import pickle
 from functools import wraps
 
 import matplotlib as mpl
@@ -271,10 +272,10 @@ def plot_some_phys(self,index=None,from_zero=False,ax=None,savefig=False,format=
     ax.set_xlim(cumulative_time[0], cumulative_time[-1])
 
 
-def plot_outcomes(self,savefig=False,format='png'):
+def plot_outcomes(self,savefig=False,format=None):
     # Plot each row as a vertical tick mark at its categorical position
     if not 'as_outcome' in self.df.columns:
-        self.add_trial_properties()
+        self.extract_trial_properties()
     
     fig = Figure(figsize=(6.4, 6.4), dpi=200)
     canvas = FigureCanvas(fig)
@@ -387,37 +388,54 @@ def plot_outcomes(self,savefig=False,format='png'):
         blueclr = (0.339, 0.4235, 0.95)
         ax.scatter(x_positions, y_positions, marker='|', s=200, color=blueclr)
 
-    if savefig:
+    if savefig or format:
+        if format is None:
+            format = 'png'
         fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_as_outcomes.{format}',format=format)
     
     return fig, ax
 
 
-def plot_probe_distribution(self,*args, **kwargs):
-    from collections import Counter
+def plot_probe_distribution(self,binwidth=2,bin_min=-500,bin_max=10,
+                            df_filter=None,index=None,savefig=False,format=None,
+                            total_counts=None, total_N=None, probe_bins=None,
+                            export=False):
+
+    """ Plot the distribution of probe positions.
+    """
+    if index is None:
+        index = self.df.index
     
-    total_counts = kwargs.get('total_counts', None)
-    total_N = kwargs.get('total_N', self.df.index)
-    probe_bins = kwargs.get('probe_bins', None)
+    filtered_df = self.df.loc[index]
 
     if total_counts is None:
-        total_counts, total_N, probe_bins = self.probe_position_distribution(*args, **kwargs)
+        total_counts, total_N, probe_bins = self.probe_position_distribution(binwidth=binwidth,
+                                                                             bin_min=bin_min,
+                                                                             bin_max=bin_max,
+                                                                             filter=df_filter,
+                                                                             index=index)
 
-    target_tuples = list(zip(self.df.pyasXPosition-self.df.probeZero, self.df.pyasWidth, self.df.pyasState))
-    most_common_tuples = Counter(target_tuples).most_common(2)
-    # print(most_common_tuples)
+    if not df_filter is None and 'pyasState' in df_filter.keys():
+        # Only show on_targetfraction if there is a filter
+        if df_filter['pyasState'] not in self.targets:
+            raise ValueError("Filter state doesn't match most common target states.")
+        target = self.targets[df_filter['pyasState']]
+
+        ontarget = self._on_target_fraction(target,total_counts,probe_bins)
+    else: 
+        ontarget = None
 
     fig = Figure(figsize=(6, 6), dpi=200)
     canvas = FigureCanvas(fig)
     ax = fig.add_subplot(111)
 
-    for mct_item in most_common_tuples:
-        mct = mct_item[0]
-        tgt_clr = _force_clrs[0 if mct[2]=='lo' else 1]
+    for key in self.targets.keys():
+        targ_dict = self.targets[key]
+        tgt_clr = _force_clrs[0 if targ_dict['pyasState']=='lo' else 1]
         rect = patches.Rectangle(
-                (0, mct[0]),        # Bottom-left corner of the rectangle
+                (0, targ_dict['pyasXPosition']),        # Bottom-left corner of the rectangle
                 (total_counts.max()),       # Width (covers the specified rows)
-                mct[1],                        # Height (covers all categories)
+                targ_dict['pyasWidth'],                        # Height (covers all categories)
                 edgecolor=tgt_clr,
                 facecolor=tgt_clr,
                 alpha=1
@@ -425,43 +443,76 @@ def plot_probe_distribution(self,*args, **kwargs):
         ax.add_patch(rect)
 
     ax.step(total_counts, probe_bins[:-1], where='post', color='blue', label='Histogram')
+
+    # Add normalized cumulative sum plot for sanity check
+    cumsum_counts = np.cumsum(total_counts)
+    norm_cumsum = cumsum_counts / cumsum_counts.max() * total_counts.max() 
+    ax.step(norm_cumsum, probe_bins[:-1], where='post', color='red', linestyle='-', label='Cumulative Sum (normalized)')
+    ax.legend()
     
     ax.set_xlabel('Probe Position')
     ax.set_ylabel('Frequency')
     ax.grid(True, alpha=0.5)
 
-    filter_val = kwargs.get('filter', None)
-    index = kwargs.get('index', self.df.index)
-    fmt = kwargs.get('fmt', None)
-
-    if not filter_val is None:
+    if not df_filter is None:
         titl = '{flk} ({idx})'.format(
-                    flk = ', '.join([filter_val[key] for key in filter_val.keys()]),
+                    flk = ', '.join([df_filter[key] for key in df_filter.keys()]),
                     idx = '-'.join([f'{index[0]}', f'{index[-1]}']))
     else: titl = ''
     ax.set_title(f'Probe: {titl}')
     print(titl)
+    if not ontarget is None:
+        ax.text(0.6, 0.95, f'Target bins: {target['pyasXPosition'] + target['pyasWidth']} - {target['pyasXPosition']}\nOn-target fraction: {ontarget:.2f}',
+                transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
-    if not fmt is None:
-        fmt = fmt or 'png'
-        if not filter_val is None:
+    if not format is None:
+        format = format or 'png'
+        if not df_filter is None:
             figname = '{ff}/{dfc}_{gno}_probe_dist_{flk}_{idx}.{fmt}'.format(
                         ff = self.fig_folder,
                         dfc = self._dfc,
-                        gno = self._genotype,
-                        flk = '_'.join([filter_val[key] for key in filter_val.keys()]),
+                        gno = self.genotype,
+                        flk = '_'.join([df_filter[key] for key in df_filter.keys()]),
                         idx = '_'.join([f'{index[0]}', f'{index[-1]}']),
-                        fmt = fmt)
+                        fmt = format)
             print(f'Saving figure: {figname}')
             fig.savefig(figname)
-            return fig, ax
         else:
-            fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_probe_dist_all.{fmt}',format=format)
-            return fig, ax
+            fig.savefig(f'{self.fig_folder}/{self._dfc}_{self.genotype}_probe_dist_all.{format}',format=format)
+
+    if export:
+        export_path = os.path.join(self.fig_folder,'exports')
+        os.makedirs(export_path, exist_ok=True)
+        # Your dictionary
+        probe_dist_dict = {'total_counts': total_counts, 'probe_bins': probe_bins, 'c': 3}
+
+        if df_filter is None:
+            flk = 'nofilt'
+        else:
+            flk = '_'.join([df_filter[key] for key in df_filter.keys()])
+
+        pklname = '{ff}/{dfc}_{gno}_probe_dist_{flk}_{idx}.{fmt}'.format(
+                    ff = export_path,
+                    dfc = self._dfc,
+                    gno = self.genotype,
+                    flk = flk,
+                    idx = '_'.join([f'{index[0]}', f'{index[-1]}']),
+                    fmt = 'pkl')   
+        
+        print(pklname)
+        # Save to a pickle file
+        with open(pklname, 'wb') as f:
+            pickle.dump(probe_dist_dict, f)
+
+    return fig, ax
 
 
 def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=None,cmax=None):
-    probe_position_hm_df = self.get_probe_position_df()
+    if not 'is_rest' in self.df.columns:
+        raise AttributeError('Need to run T.extract_trial_properties()')
+    
+    probe_position_hm_df = self.ds_and_align_probe_position_hmdf()
 
     fig = Figure(figsize=(8, 8), dpi=300)
     canvas = FigureCanvas(fig)

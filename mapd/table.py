@@ -1,4 +1,3 @@
-from scipy.io import loadmat
 from .helpers import get_day_fly_cell, get_file, default_data_directory
 # from .table_plotters import plot_some_trials, plot_outcomes, plot_probe_distribution, probe_position_heatmap
 import types
@@ -6,7 +5,8 @@ from . import table_plotters
 from . import table_movie_maker
 from . import table_export_methods
 from . import table_scalars
-from .trial import Trial
+from mapd.trial import Trial
+from mapd.trial import TRIAL_METADATA_GROUP
 
 import importlib
 importlib.reload(table_plotters)
@@ -16,16 +16,20 @@ importlib.reload(table_export_methods)
 import os
 import subprocess
 import pandas as pd
+pd.options.mode.chained_assignment = 'raise'
 # import modin.pandas as pd
 import swifter
 import numpy as np
 from datetime import datetime, timedelta
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from functools import cached_property
+# from matplotlib.figure import Figure
+# from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from collections import Counter
+from scipy.io import loadmat
 
 # from matplotlib import pyplot as plt
-import matplotlib.patches as patches
-import seaborn as sns
+# import matplotlib.patches as patches
+# import seaborn as sns
 
 import matplotlib as mpl
 mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
@@ -47,12 +51,19 @@ _outcomes_dict = {
     'info': 'info',
 }
 
-_outcomes_cat =             pd.api.types.CategoricalDtype(categories=_outcomes_dict.keys(), ordered=True)
-_pyas_state_cat =                     pd.api.types.CategoricalDtype(categories=['lo','hi'], ordered=True)
+_as_outcomes_cat =             pd.api.types.CategoricalDtype(categories=_outcomes_dict.keys(), ordered=True)
+_pyasState_cat =                     pd.api.types.CategoricalDtype(categories=['no_state','lo','hi'], ordered=True)
 _vnc_status_cat =           pd.api.types.CategoricalDtype(categories=['intact','cut'], ordered=True)
 _filtercube_status_cat =    pd.api.types.CategoricalDtype(categories=['green','blue'], ordered=False)
+_fiberLED_cat =    pd.api.types.CategoricalDtype(categories=['epi_only','740_ir','625_red','590_orange','470_blue','405_uv'], ordered=True)
 
-_categories_list = [_outcomes_cat,_pyas_state_cat,_vnc_status_cat,_filtercube_status_cat]
+_category_dict = {
+    'as_outcome': _as_outcomes_cat,
+    'pyasState': _pyasState_cat,
+    'vnc_status': _vnc_status_cat,
+    'filtercube_status': _filtercube_status_cat,
+    'fiberLED': _fiberLED_cat,
+}
 
 
 def pyas_state(df):
@@ -68,7 +79,7 @@ class Table:
     Table represents a set of trials from the FlySoundAcquisition software.
     """
 
-    def __init__(self,fn,fig_folder='./figpanels'):
+    def __init__(self,fn,fig_folder='./figpanels',progress_bar=False,add_probestate = False):
         self.topdir = default_data_directory(verbose=True)
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
@@ -77,7 +88,7 @@ class Table:
         self.fig_folder = fig_folder
         os.makedirs(self.fig_folder, exist_ok=True)
         
-        self.progress_bar = True  # Set to False to disable progress bar in swifter
+        self.progress_bar = progress_bar  # Set to False to disable progress bar in swifter
         self._outcomes_dict = {
             'no_as_no_mv': 'no aversive stimulus, no movement',
             'no_as_mv': 'no aversive stimulus, probe moves',
@@ -93,44 +104,82 @@ class Table:
         self.flycelldir = self.day + '_F' + str(self.fly) + '_C' + str(self.cell)
         self.path = os.path.join(self.topdir,self.day,self.flycelldir)
 
-        self.df = None
-        self._load_parquet()
-
-        self._tfn_template = None
-        self._trial_file_name_template()
-        
-        self._excluded_df = None
-        self.exclude_trials()
-        
-        self._genotype = None
-        
+        # placeholders for computed properties
+        self._df_filter = None
+        self._probe_bins = None
+        self._total_counts = None
+        self._total_N = None
         self.ppdf = None  # probe positions dataframe
         self.hmdf = None
+        self.df = None
+        self._excluded_df = None
+        self._tfn_template = None
+
+        self._load_parquet()
+        self._trial_file_name_template()
+        self.get_trials()
+        self.exclude_trials()
+        self._bootstrap_meta_columns()
+        self.get_target_positions()
+
+        if not 'pyasState' in self.df.columns:
+            if not add_probestate:
+                print('Need to write to pyasState')
+                return
+            print('Need to write to pyasState')
+            self._assume_probeZero_from_lo_target()
+            self.write_column_to_trial_files('probeZero')
+            self._map_assumed_pyasState()
+            self.write_column_to_trial_files('pyasState')
+            print('Re-adding pyasState and probeZero meta columns')
+            self._bootstrap_meta_columns()
+            self.get_target_positions()
+
+        self.df = self.df.copy()
+        self.df['op_cnd_blocks'] = (self.df['pyasState'] != self.df['pyasState'].shift(1)).cumsum()
+        self.df['pyasState'] = self.df['pyasState'].astype(_pyasState_cat)
 
 
-    @property
-    def trial_series(self):
-        if not 'Trial' in self.df.columns:
-            self.get_trials()
-        return self.df['Trial']
-    
+    def _assume_probeZero_from_lo_target(self):      
+        target_x = list(self.targets.keys())
+        if all([isinstance(i,str) for i in target_x]):
+            raise KeyError('Targets are already assigned names: {}'.format(', '.join(target_x)))
+        lo_x = (np.array(target_x)).max()       # the target with the higher number is lo force
+        probeZero = lo_x+180                    # assume probeZero is 180 um to the right of the high-force, lo value end of the target (pyasXPosition)
+        mapping = {(np.array(target_x)).max():probeZero, (np.array(target_x)).min(): probeZero}
+        self.df['probeZero'] = self.df['pyasXPosition'].apply(
+            lambda x: mapping.get(x, np.nan)
+        )
+        print('ProbeZero is calculated as {}. {} Trials do not have an appropriate value.'.format(probeZero,int(self.df['probeZero'].isna().sum())))
+        print('Recommend running T.plot_probe_distribution() after assigning state')
 
-    @property
-    def _outcomes_cat(self):
-        return _outcomes_cat
 
-    @property
+    def _map_assumed_pyasState(self):     
+        target_x = list(self.targets.keys())
+        mapping  = {(np.array(target_x)).max():'lo', (np.array(target_x)).min(): 'hi'}
+        
+        self.df['pyasState'] = self.df['pyasXPosition'].map(mapping).astype('string')
+        print('Writing assumed pyasState. {} Trials do not have an appropriate value.'.format(
+            int(self.df['pyasState'].isna().sum())))
+        print('Recommend running T.plot_probe_distribution(binwidth=2,bin_min=100,bin_max=800,filter=None,index=None) after assigning state')        
+
+
+    @cached_property
     def genotype(self):
-        if self._genotype is None:
-            self._get_genotype()
-        return self._genotype
+        return self._get_genotype()
+
+
+    @property
+    def dfc(self):
+        return self._dfc
+
 
     def exclude_trials(self):
         if not 'Trial' in self.df.columns:
             self.get_trials()
 
         tru_arr = np.array([[1]])
-        self.df['excluded'] = self.df.Trial.apply(lambda tr: np.array_equal(tru_arr,tr.excluded))
+        self.df.loc[self.df.index,'excluded'] = self.df.Trial.apply(lambda tr: np.array_equal(tru_arr,tr.excluded))
         to_exclude = self.df[self.df['excluded'] == True]
         if self._excluded_df is None:
             self._excluded_df = to_exclude
@@ -161,32 +210,74 @@ class Table:
         return self.df['Trial']
         
 
-    def add_trial_properties(self,prop_list=['total_duration','is_rest','is_probe','as_duration','as_outcome'],rerun=False):
+    def get_target_positions(self):
+        """
+        Get the target positions for the table.
+        """
+        self.targets = {}
+        if 'pyasXPosition' not in self.df.columns or 'pyasWidth' not in self.df.columns:
+            print(self.df.columns)
+            raise ValueError("DataFrame does not contain 'pyasXPosition' or 'pyasWidth' columns.")
+        if 'probeZero' in self.df.columns and 'pyasState' in self.df.columns:
+            tempdf = self.df[['pyasState','probeZero','pyasXPosition','pyasWidth',]].copy()
+            tempdf.loc[self.df['probeZero'].isna(),'probeZero'] = 0
+            tempdf.loc[self.df['pyasState'].isna(),'pyasState'] = 'no_state'
+            target_tuples = list(zip(tempdf.pyasState,
+                                    tempdf.probeZero,
+                                    tempdf.pyasXPosition-tempdf.probeZero, 
+                                    tempdf.pyasWidth,))
+            tuple_counter = Counter(target_tuples) # Assume two most common target positions
+            for mct_item in tuple_counter.most_common(2):
+                mct = mct_item[0]
+                
+                target_dict = {'probeZero': mct[1],
+                            'pyasXPosition': mct[2],
+                            'pyasWidth': mct[3],
+                            'pyasState': mct[0]}
+                self.targets[mct[0]] = target_dict
+        else: 
+            print('ProbeZero or pyasState not yet computed, collecting pyasXPosition and pyasWidth')
+            target_tuples = list(zip(self.df.pyasXPosition, 
+                                    self.df.pyasWidth))
+            tuple_counter = Counter(target_tuples) # Assume two most common target positions
+            for mct_item in tuple_counter.most_common(2):
+                mct = mct_item[0]
+                
+                target_dict = {'pyasXPosition': mct[0],
+                            'pyasWidth': mct[1]}
+                self.targets[mct[0]] = target_dict
+            
+        print('Found {} target positions - {}'.format(len(tuple_counter), tuple_counter))
+
+        return self.targets
+
+
+    def extract_trial_properties(self,
+                                prop_list: list =['total_duration','is_rest','is_probe','as_duration','as_outcome'],
+                                persist: bool = False,
+                                group_name: str = TRIAL_METADATA_GROUP,
+                                rewrite_attrs: bool = False):
         """ Compute properties for each trial and add them to the DataFrame.
         """
-        def compute_property(tr, prop, rerun=False):
+        def compute_property(tr, prop):
             if not hasattr(tr, prop):
-                raise ValueError(f"Trial object does not have a property called '{prop}'")
+                print('Trial is {}'.format(tr))
+                raise ValueError(f"Call T.extract_trial_properties() or T.extract_trial_properties(''{prop}'')")
             if callable(getattr(tr, prop)):
-                return getattr(tr, prop)(rerun=rerun)
+                return getattr(tr, prop)()
             else:
                 return getattr(tr, prop)
 
+        newcols = {}
         for prop in prop_list:
-            print('Computing trial {}'.format(prop))
-            self.df[prop] = self.df['Trial'].swifter.progress_bar(self.progress_bar).apply(lambda tr: compute_property(tr, prop))
-            
-            if prop == 'as_outcome':
-                # Convert to categorical type
-                self.df['as_outcome'] = self.df['as_outcome'].astype(_outcomes_cat)
-
-        if 'op_cnd_blocks' not in self.df.columns:
-            self.df['op_cnd_blocks'] = (self.df['pyasState'] != self.df['pyasState'].shift(1)).cumsum()
-            self.df['pyasState'] = self.df['pyasState'].astype(_pyas_state_cat)
-        
+            s = self.df['Trial'].map(lambda tr: compute_property(tr, prop))
+            if prop in _category_dict:
+                s = s.astype(_category_dict[prop])
+            newcols[prop] = s
+        self.df = self.df.assign(**newcols)
         return self.df[prop_list]
-    
 
+    
     def probe_positions_df(self,df=None):
         # Collect a dataframe of trial information
         # Once trial.probe_position is called, that data has been loaded
@@ -204,11 +295,11 @@ class Table:
             if any(trial.probe_position>1000):
                 trial.exclude(reason='probe values too high')
                 ValueError('Have to exclude trial, probe is too high, rerun')
-            pps = trial.probe_position - trial.params['probeZero']
+            pps = trial.probe_position - trial.probeZero
             return {'probe_positions': pps,
                     'probe_min': pps.min(),  # Max flexion
                     'probe_max': pps.max(),  # Should be close to ProbeZero
-                    'probe_zero': trial.params['probeZero'],
+                    'probe_zero': trial.probeZero
                     }
 
         ppdf = df.swifter.progress_bar(self.progress_bar).apply(get_probe_positions, axis=1, result_type='expand')
@@ -241,31 +332,35 @@ class Table:
         return ppdf
 
 
-    def get_probe_position_df(self):
+    def ds_and_align_probe_position_hmdf(self, overwrite = False):
         # first test that all of the stimulus duration is the same
-        def trial_duration(row):
-            return row.preDurInSec+row.stimDurInSec+row.postDurInSec
-        trial_dur = self.df.apply(trial_duration,axis=1)
-        if not trial_dur.nunique() == 1:
-            raise NotImplementedError('What if the trial duration is different?')
+        trial_dur = self.df.eval("preDurInSec + stimDurInSec + postDurInSec")
+        if trial_dur.nunique() != 1:
+            min = trial_dur.argmin()
+            tr = self.df.loc[self.df.index[min],'Trial']
+            print("Trial duration is different, assuming the length of the shortest trial: Trial {} - {} s".format(min,trial_dur.iloc[min]))
+        else:
+            tr = self.df.loc[self.df.index[0],'Trial']
 
-        if not self.hmdf is None:
+        if (not self.hmdf is None) and (not overwrite):
             return self.hmdf
         
         probe_positions = self.probe_positions_df()
-        tr = self.df.loc[probe_positions.index[0],'Trial']
         ds_time = tr.time[tr.downsample_probe]
         ds_trpridx = tr.downsample_probe[ds_time < tr.trialtime[-1]]
         ds_trtime = ds_time[ds_time < tr.trialtime[-1]]
 
-        probe_positions['probe_positions'] = probe_positions['probe_positions'].apply(lambda x: x[ds_trpridx])
+        try:
+            probe_positions['probe_positions'] = probe_positions['probe_positions'].apply(lambda x: x[ds_trpridx])
+        except IndexError as e:
+            raise(e)
         probe_positions['length'] = probe_positions['probe_positions'].apply(lambda x: len(x))
 
         self.hmdf = pd.DataFrame(probe_positions['probe_positions'].apply(lambda a: a.ravel()).to_list(), index=probe_positions.index, columns=ds_trtime)
         return self.hmdf
 
 
-    def probe_position_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=None,index=None,savefig=False,format=None):
+    def probe_position_distribution(self,binwidth=2,bin_min=None,bin_max=None,filter=None,index=None):
 
         if index is None:
             index = self.df.index
@@ -283,12 +378,19 @@ class Table:
             ValueError('bin_max must be specified') # bin_max = probe_positions.probe_max.max() # Should be ProbeZero
         probe_bins = np.arange(bin_min, bin_max, binwidth)
 
+        if self._df_filter == filter and (not self._probe_bins is None):
+            if np.array_equal(self._probe_bins, probe_bins):
+                print('Using existing probe bins')
+                return self._total_counts, self._total_N, self._probe_bins
+        else:
+            print('New filter or probe bins, recomputing distributions')
+
         def trial_probe_position_ds(row):
             trial = row.Trial
             if any(trial.probe_position>1000):
                 trial.exclude(reason='probe values too high')
                 ValueError('Have to exclude trial, probe is too high, rerun')
-            pps = trial.probe_position - trial.params['probeZero']
+            pps = trial.probe_position - trial.probeZero
             pps = pps[row.Trial.downsample_probe]
 
             counts, _ = np.histogram(pps, bins=probe_bins)
@@ -297,68 +399,114 @@ class Table:
                     'N': len(pps)
                     }
 
-        print('Calculating downsampled probe positions')
+        print('Counting downsampled probe positions in bins')
         counts_per_bin = filtered_df.swifter.progress_bar(self.progress_bar).apply(trial_probe_position_ds, axis=1, result_type='expand')
+ 
         stacked_counts = np.stack(counts_per_bin['counts'].values)
         total_counts = np.sum(stacked_counts, axis=0)
         total_N = np.sum(counts_per_bin['N'].values)
+
+        self._df_filter = filter
+        self._total_counts = total_counts
+        self._total_N = total_N
+        self._probe_bins = probe_bins
+        
         return total_counts, total_N, probe_bins
 
+
+    def _on_target_fraction(self,target,total_counts,probe_bins):
+        binwidth = np.diff(probe_bins[2:4])
+        tbin_max = target['pyasXPosition']
+        tbin_min = target['pyasXPosition'] + target['pyasWidth']
+
+        target_bins = (probe_bins[:-1] <= tbin_min+2*binwidth) & (probe_bins[:-1] >= tbin_max-2*binwidth)
+
+        ontarget = np.sum(total_counts[target_bins]) / np.sum(total_counts)
+        print('On target ({} - {}): {:.2f} ({}/{})'.format(
+            tbin_max-2*binwidth,
+            tbin_min+2*binwidth,
+            ontarget,
+            np.sum(total_counts[target_bins]),
+            np.sum(total_counts)
+        ))
+        return ontarget
     
-    def add_df_category(self, category, trial_min=None, trial_max=None, trial_index=None, categories=None):
+
+    def assign_column_value(self, column_name, value, trial_min=None, trial_max=None, index=None, dtype=None, write_to_hdf5=False):
         # add tag like VNC cut
-        if all([x is None for x in [trial_min,trial_max,trial_index]]):
-               ValueError('Need some indication of which trials')
-        
-        index = self.df.index
-        if not trial_min is None:
-            index = index[index.get_loc(trial_min):]
+        if all(x is None for x in [trial_min, trial_max, index]):
+            raise ValueError("Must specify trial_min, trial_max, or trial_index to select rows.")
 
-        if not trial_max is None:
-            index = index[:index.get_loc(trial_max)]
-
-        if not categories is None:
-            if isinstance(categories,pd.CategoricalDtype):
-                raise NotImplementedError('what if input is a categorical type?')
-
-            else:
-                cat_name=categories
-                try:
-                    scope = globals()
-                    categories =  scope.get(categories, None)
-                except ModuleNotFoundError:
-                    raise ImportError(f"Module '{categories}' not found.")
-                if not category in categories.categories:
-                    raise ValueError(f"Category '{category}' not found in {categories.categories}.")
-
+        if index is not None:
+            index = self.df.index[index] if isinstance(index, (list, np.ndarray, pd.Index)) else [index]
         else:
-            # First check if category is a category in the _category_list
-            for dtype in _categories_list:
-                if category in dtype.categories:
-                    categories=dtype
-                    print(categories.categories)
-                    break
-            if categories is None:
-                raise NotImplementedError('What if there still is no categories?')
-            
-        assert(isinstance(categories,pd.CategoricalDtype))
-        assert(category in categories.categories)
+            index = self.df.index
+            if not trial_min is None:
+                try:
+                    index = index[index.get_loc(trial_min):]
+                except KeyError as e:
+                    index = index
+
+            if not trial_max is None:
+                try:
+                    index = index[:index.get_loc(trial_max)+1]
+                except KeyError as e:
+                    index = index
+
+        # Assign the value
+        # Validate value length if assigning a sequence
+        if hasattr(value, '__len__') and not isinstance(value, str):
+            if len(index) != len(value):
+                raise ValueError(f"Length of value ({len(value)}) does not match length of index ({len(index)})")
         
-        # first_category = categories.categories[0]  # 'intact'
-        # if not categories in self.df.columns:
-        #     print(first_category)
-        #     self.df.loc[self.df.index,cat_name] = pd.Series([first_category] * len(self.df), dtype=categories)
-        self.df.loc[index,cat_name] = category
+        self.df[column_name] = np.nan
+        self.df.loc[index, column_name] = value
 
-        return index
+        # Try to infer dtype if not provided
+        if dtype is None and column_name in _category_dict:
+            dtype = _category_dict[column_name]
 
+        # Validate category membership if dtype was inferred
+        if isinstance(dtype, pd.CategoricalDtype):
+            if value not in dtype.categories:
+                raise ValueError(f"Value '{value}' is not a valid category in {dtype.categories}")
+            self.df[column_name] = self.df[column_name].astype(dtype)
 
-    def compute_trial_method(self, method_name: str,trial_col: str = 'Trial'):
+        if write_to_hdf5:
+            # print('Writing column {} to trial files.'.format(column_name))
+            self.write_column_to_trial_files(column_name)
+        else: 
+            print('Not writing column {} to trial files. Call T.write_column_to_trial_files(''{}'')'.format(column_name,column_name))
+
+        return pd.Series([value], dtype=dtype).iloc[0]
+
+        
+    def write_column_to_trial_files(self, column_name):
+        """
+        Write the value in `column_name` to each Trial's HDF5 file,
+        skipping if it's already present and matches.
+        """
+        print('Writing {} to each trial'.format(column_name))
+        def writer(row):
+            trial :Trial = row['Trial']
+            value = row[column_name]
+            if isinstance(value,str):
+                return trial.write_string_if_changed(column_name, value)
+            elif isinstance(value,float):
+                return trial.write_scalar_if_changed(column_name, value)
+            else:
+                return np.nan
+
+        return self.df.swifter.progress_bar(self.progress_bar).apply(writer, axis=1)
+        
+
+    def compute_trial_method(self, method_name: str,*,trial_col: str = 'Trial',debug: bool = False):
         """Compute a function on the trial object and add to the df"""
         if not hasattr(self.df[trial_col].iloc[0], method_name):
             raise AttributeError(f"Trial objects do not have a method called '{method_name}'")
 
-        self.df[method_name] = self.df[trial_col].swifter.progress_bar(self.progress_bar).apply(lambda trial: getattr(trial,method_name)())
+        trial_ser = self.df[trial_col].copy().swifter.progress_bar(self.progress_bar).apply(lambda trial: getattr(trial,method_name)(debug))
+        self.df[method_name] = trial_ser
 
 
     def open_notes_files(self):
@@ -403,10 +551,10 @@ class Table:
         A successful trial is a trial where the fly enters the target and stays at least 2 trials.
         """
         if 'as_outcome' not in self.df.columns:
-            self.add_trial_properties(prop_list=['as_outcome'])
+            self.extract_trial_properties(prop_list=['as_outcome'])
         
         if 'on_target' not in self.df.columns:
-            self.add_trial_properties(prop_list=['on_target'])
+            self.extract_trial_properties(prop_list=['on_target'])
 
         as_off = (self.df['as_outcome'] == 'as_off') | (self.df['as_outcome'] == 'as_off_late')
         no_as = (self.df['as_outcome'] == 'no_as_no_mv') | (self.df['as_outcome'] == 'no_as_mv')
@@ -448,13 +596,13 @@ class Table:
                     if np.all(pp == next_pp):
                         return 'successful'
 
-            else:
+            elif not row['success']:
                 return 'unsuccessful'
 
         self.df['success_type'] = self.df.apply(classify_success, axis=1)
 
         if 'target_enter_side' not in self.df.columns:
-            self.add_trial_properties(prop_list=['on_target'])
+            self.extract_trial_properties(prop_list=['on_target'])
         # what kind of success?
         self.df['success_type'] = 'unsuccessful'
 
@@ -472,6 +620,7 @@ class Table:
         
         successful_enter_trials = self.df[self.df['as_outcome'] == 'enter'].shape[0]
         return successful_enter_trials
+    
 
     # ---------------------------------------------------------
     # Helper (Internal) Methods
@@ -517,6 +666,26 @@ class Table:
         self._genotype = self._genotype.replace('>', '_')
         self._genotype = self._genotype.replace('/', '_')
         return self._genotype
+
+
+    def _bootstrap_meta_columns(self) -> None:
+        """Create df columns for every /meta key across all trials and fill values."""
+        trials = self.df['Trial']
+
+        # 1) discover union of keys
+        get_keys = (lambda tr: tr.list_meta_keys())
+        print('Getting all meta keys')
+        key_lists = trials.swifter.progress_bar(self.progress_bar).apply(get_keys)
+        keys = sorted({k for ks in key_lists for k in (ks or [])})
+
+        print(keys)
+        if not keys:
+            return
+
+        # 2) pull each key’s value into a Series and install
+        for key in keys:
+            self.extract_trial_properties([key])
+
 
     # ---------------------------------------------------------
     # Dunder Methods
