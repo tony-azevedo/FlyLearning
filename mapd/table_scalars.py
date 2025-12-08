@@ -19,14 +19,52 @@ def compute_duration(self):
         self.extract_trial_properties(prop_list=['total_duration'])
     return self.df['total_duration'].sum()
 
+
 def compute_rms_velocity(self):
     self.compute_trial_method('probe_rms_velocity')
-
     return self.df['probe_rms_velocity'].sum()
+
+
+def compute_probe_positive_effort(self):
+    self.compute_trial_method('probe_positive_effort')
+    return self.df['probe_positive_effort'].sum()
+
+
+def compute_prestim_v_rms(self):
+    self.compute_trial_method('prestim_v_rms')
+    return self.df['prestim_v_rms'].sum()
+
+
+def compute_prestim_holding_cost(self):
+    self.compute_trial_method('prestim_holding_cost')
+    return self.df['prestim_holding_cost'].sum()
+
+
+def compute_holding_cost(self):
+    self.compute_trial_method('probe_holding_cost')
+    return self.df['probe_holding_cost'].sum()
+
+
+def compute_successes(self):
+    if not 'success' in self.df.columns:
+        self.find_successful_trials()
+    successes = self.df['success'].sum()
+    # print(fracs)
+    return successes
+
+
+def compute_hard_successes(self):
+    if not 'hard_success' in self.df.columns:
+        self.find_successful_trials()
+    successes = self.df['hard_success'].sum()
+    # print(fracs)
+    return successes
+
 
 def compute_outcome_fractions(self):
     if not 'as_outcome' in self.df.columns:
         self.extract_trial_properties(self,prop_list=['as_outcome'])
+    # exclude
     val_cnts = self.df['as_outcome'].value_counts()
     fracs = val_cnts / val_cnts.sum()
     # print(fracs)
@@ -171,3 +209,8 @@ def compute_blue_toggle_fraction(self):
 
 def compute_most_common_fiberLED(self):
     return self.df['fiberLED'].value_counts().idxmax()
+
+
+def compute_on_target_2x_punishment(self):
+    raise NotImplementedError('Finish computing this comparison') 
+    # return self.df['fiberLED'].value_counts().idxmax()

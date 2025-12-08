@@ -114,6 +114,75 @@ def _set_ascii_attr(h5obj, key: str, value: str):
     h5obj.attrs.create(key, value, dtype=h5py.string_dtype(encoding='ascii'))
 
 
+def velocity(t,x):
+    v = np.gradient(x, t)
+    # assert x.shape == t.shape
+    return v
+
+
+def acceleration(t,x):
+    """A measure of effort in motor control"""
+    a = np.gradient(velocity(t,x), t)
+    return a
+
+
+def mean_velocity(t,x):
+    """Integral of abs(velocity)"""
+    vigor = np.mean(np.abs(velocity(t,x)))
+    return vigor
+
+
+def rms_velocity(t,x):
+    """Weights faster movements more"""
+    v = velocity(t,x)
+    v_rms = np.sqrt(np.mean(v**2))
+    return v_rms
+
+
+def jerk_energy(t,x):
+    """A measure of effort in motor control"""
+    jerk = np.gradient(acceleration(t,x),t)
+    jerk_energy = np.sum(jerk**2) * np.diff(t[0:1])
+    return jerk_energy
+
+
+def power(t,x):
+    v = velocity(t,x)
+    power = -k_spring_constant * x * v
+    return power
+
+
+def work(t,x):       
+    """Work Done Against the Spring"""
+    p = power(t,x)
+    work = np.trapezoid(power,t)
+    return work
+
+
+def holding_cost(t,x):
+    """Holding Cost (integrated potential energy)"""
+    U = 0.5 * k_spring_constant * x**2
+    holding_cost = np.trapezoid(U, t)
+    return holding_cost
+
+
+def positive_effort(t,x):
+    '''Assumes p is never negative'''
+    v = velocity(t,x)
+    pos_vel = np.clip(v, a_min=0, a_max=None)
+    power = k_spring_constant * x * pos_vel
+    effort = np.trapezoid(np.clip(power, a_min=0, a_max=None), t)
+    return effort
+
+
+def effort(t,x, alpha=1e-6, beta = 1e-2):
+    """Effort Cost Function, symetric, Not in use"""
+    v = velocity(t,x)
+    effort = np.trapezoid(alpha * v**2 + beta * x**2, t)
+    return effort
+
+
+
 class Trial:
     """
     Trial represents a trial from the FlySoundAcquisition software.
@@ -188,11 +257,13 @@ class Trial:
             self.create_time()
         return self._trialtime
 
+
     @cached_property
     def downsample_probe(self):
         if self._downsample_probe is None:
             self.create_probe_downsample_idx()
         return self._downsample_probe
+
 
     @property
     def as_duration(self):
@@ -209,13 +280,17 @@ class Trial:
         return self._as_duration
 
 
-    @property  # Have to be able to change this.
+    @property  # not cached, have to be able to change this.
     def as_outcome(self):
         return self.get_as_outcome(rerun=False)
     
 
-    def get_as_outcome(self, rerun=False):
-        if self._as_outcome is None  or rerun:  #or self._as_outcome is s.MISSING
+    def get_as_outcome(self, rerun=False,verbose = False):
+        if rerun:
+            # print(f'Reclassifying trial outcomes: {rerun}')
+            self._classify_as_outcome(rerun=rerun,verbose=verbose)
+
+        elif self._as_outcome is None or not rerun:  #or self._as_outcome is s.MISSING
             try:
                 # val = self._read_string_from_meta('as_outcome')
                 val = self._read_value_from_meta('as_outcome')
@@ -233,7 +308,7 @@ class Trial:
 
                 if self._as_outcome is None:
                     self._classify_as_outcome(rerun=rerun)
-
+        
         # if self._as_outcome is s.MISSING:
         #     print('Missing a loop')
         return self._as_outcome
@@ -384,41 +459,56 @@ class Trial:
         self._downsample_probe = indices
 
 
-    def _classify_as_outcome(self,rerun=False):
+    def _classify_as_outcome(self,rerun=False, verbose=False):
         if (self._as_outcome is None) or rerun:
-            if self.is_rest:
-                self._as_outcome = 'rest'
+            # if self.is_rest:
+            #     self._as_outcome = 'rest'
             
-            elif self.is_probe:
-                self._as_outcome = 'probe'
+            # elif self.is_probe:
+            #     self._as_outcome = 'probe'
+            
+            probe_position = self.probe_position.ravel()
+            t = self.time
+            target_min = self.pyasXPosition
+            target_max = self.pyasXPosition + self.pyasWidth
 
-            elif self._as_duration==0:
-                self._as_outcome = 'no_as_no_mv'
-                
-                # but is the probe in the target the entire time?
-                probe_position = self.probe_position.ravel()
-
-                target_min = self.pyasXPosition
-                target_max = self.pyasXPosition + self.pyasWidth
-                if any(probe_position<target_min) | any(probe_position>target_max):
-                    # print('Trial {}: probe leaves target'.format(self))
-                    self._as_outcome = 'no_as_mv'
-
-            elif self.as_duration < self.params['stimDurInSec']:
-                self._as_outcome = 'as_off'
-            else:
-                probe_position = self.probe_position[self.time>0].ravel()
-                target_min = self.pyasXPosition
-                target_max = self.pyasXPosition + self.pyasWidth
-                if any((probe_position>target_min) & (probe_position<target_max)):
-                    self._as_outcome = 'as_off_late'
-                elif all(probe_position<target_min):
-                    self._as_outcome = 'timeout_fail'
-                    # if self._post_stim_var > self._mv_thresh:
-                    #     self._as_outcome = 'timeout_fail'
-                else: 
+            if self.is_probe:
+                if self._as_duration==0:
+                    # but is the probe in the target the entire time?
+                    if any(probe_position[t>0]<target_min) | any(probe_position[t>0]>target_max):
+                        # print('Trial {}: probe leaves target'.format(self))
+                        self._as_outcome = 'no_as_mv'
+                    else:
+                        self._as_outcome = 'no_as_no_mv'
+                elif any(probe_position[t>0]>target_min) & any(probe_position[t>0]<target_max):
+                    self._as_outcome = 'as_off'
+                else:
                     self._as_outcome = 'timeout'
+
+            else:
+                if self._as_duration==0:
+                    # but is the probe in the target the entire time?
+                    if any(probe_position[t>0]<target_min) | any(probe_position[t>0]>target_max):
+                        # print('Trial {}: probe leaves target'.format(self))
+                        self._as_outcome = 'no_as_mv'
+                    else:
+                        self._as_outcome = 'no_as_no_mv'
+
+                elif self.as_duration < self.params['stimDurInSec']:
+                    self._as_outcome = 'as_off'
+
+                else:
+                    if any((probe_position>target_min) & (probe_position<target_max)):
+                        self._as_outcome = 'as_off_late'
+                    elif all(probe_position<target_min):
+                        self._as_outcome = 'timeout_fail'
+                        # if self._post_stim_var > self._mv_thresh:
+                        #     self._as_outcome = 'timeout_fail'
+                    else: 
+                        self._as_outcome = 'timeout'
             self.write_string_if_changed('as_outcome',self._as_outcome)
+            if verbose:
+                print(f'{self._as_outcome}: {self.__repr__()}')
             return self._as_outcome
         elif (self._as_outcome is None) and not rerun:
             raise KeyError('Is the current as_outcome correct?')
@@ -439,93 +529,116 @@ class Trial:
         if probe_position is None:
             probe_position = self.probe_position.ravel()
         
-        target_min = self.params['pyasXPosition']
-        target_max = self.params['pyasXPosition'] + self.params['pyasWidth']
+        target_min = self.pyasXPosition
+        target_max = self.pyasXPosition + self.pyasWidth
         
         return np.sum((probe_position >= target_min) & (probe_position <= target_max))/ len(probe_position)
 
+    
+    def time_on_target(self, probe_position=None):
+        """
+        How long is the probe on the target.
+        This is a helper function to quantify how much the probe is on the target during the trial.
+        Args:
+            probe_position (np.ndarray): The probe position data. If None, uses self.probe_position.
+        
+        Returns:
+            float: The fraction of time the probe is on the target.
+        """
+        on_target_frac = self.on_target()
+        
+        return on_target_frac * np.diff([self.time[0],self.time[-1]])[0]
+    
 
     ## Compute functions, using the downsampled probe
-    def probe_velocity(self):
-        x = self.probe_position[self.downsample_probe].squeeze()
-        t = self.time[self.downsample_probe]
-        # assert x.shape == t.shape
-        # print(x.shape)
-        # print(t.shape)
-        v = np.gradient(x, t)
-        # assert x.shape == t.shape
-        return v
+    def probe_velocity(self,debug = False):
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return velocity(t,x)
 
     
-    def probe_acceleration(self):
+    def probe_acceleration(self,debug = False):
         """A measure of effort in motor control"""
-        ds_v = self.probe_velocity()
-        ds_time = self.time[self.downsample_probe]
-        a = np.gradient(ds_v, ds_time)
-        return a
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return acceleration(t,x)
 
 
-    def probe_mean_velocity(self,):
-        """Integral of abs(velocity)"""
-        vigor = np.mean(np.abs(self.probe_velocity))
-        return vigor
+    # def probe_mean_velocity(self,debug = False):
+    #     """Integral of abs(velocity)"""
+    #     x = self.probe_position[self.downsample_probe].squeeze()
+    #     t = self.time[self.downsample_probe].squeeze()
+    #     return mean_velocity(t,x)
     
 
     def probe_rms_velocity(self,debug=False):
         """Weights faster movements more"""
-        v = self.probe_velocity()
-        rms_vigor = np.sqrt(np.mean(v**2))
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
         if debug:
             print(f"Trial {self.params['trial']}")
-        return rms_vigor
+        return rms_velocity(t,x)
 
 
-    def probe_jerk_energy(self):
-        """A measure of effort in motor control"""
-        ds_time = self.time[self.downsample_probe]
-        jerk = np.gradient(self.probe_acceleration(), ds_time)
-        jerk_energy = np.sum(jerk**2) * np.diff(ds_time[2:3])
-        return jerk_energy
+    # def probe_jerk_energy(self,debug = False):
+    #     """A measure of effort in motor control"""
+    #     x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+    #     t = self.time[self.downsample_probe].squeeze()
+    #     return jerk_energy(t,x)
 
 
-    def probe_power(self):
-        x = self.probe_position[self.downsample_probe].squeeze()
-        v = self.probe_velocity()
-        power = -k_spring_constant * x * v
-        return power
+    def probe_power(self,debug = False):
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return power(t,x)
 
 
-    def probe_work(self):
+    def probe_work(self,debug = False):       
         """Work Done Against the Spring"""
-        t = self.time[self.downsample_probe]
-        power = self.probe_power()
-        work = np.trapezoid(power,t)
-        return work
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return work(t,x)
 
 
-    def probe_holding_cost(self):
+    def probe_holding_cost(self,debug = False):
         """Holding Cost (integrated potential energy)"""
-        t = self.time[self.downsample_probe]
-        x = self.probe_position[self.downsample_probe].squeeze()
-        U = 0.5 * k_spring_constant * x**2
-        holding_cost = np.trapezoid(U, t)
-        return holding_cost
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return holding_cost(t,x)
 
-
-    def probe_positive_effort(self):
-        power = self.probe_power()
-        t = self.time[self.downsample_probe]
-        effort = np.trapezoid(np.clip(power, a_min=0, a_max=None), t)
-        return effort
     
+    def probe_positive_effort(self,debug = False):
+        '''Assumes p is never negative'''
+        t = self.time[self.downsample_probe].squeeze()
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        if debug:
+            print(f"Trial {self.params['trial']}")
+        return positive_effort(t,x)
 
-    def probe_effort(self, alpha=1e-6, beta = 1e-2):
+
+    def probe_effort(self,debug = False, alpha=1e-6, beta = 1e-2):
         """Effort Cost Function, symetric, Not in use"""
-        x = self.probe_position[self.downsample_probe].squeeze()
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe].squeeze()
+        return effort(t,x)
+
+
+    def prestim_v_rms(self,debug = False):
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
         t = self.time[self.downsample_probe]
-        v = self.probe_velocity()
-        effort = np.trapezoid(alpha * v**2 + beta * x**2, t)
-        return effort
+        prestim_x = x[t<0]
+        prestim_t = t[t<0]
+        prestim_rms = rms_velocity(prestim_t,prestim_x)
+        return prestim_rms
+
+
+    def prestim_holding_cost(self,debug = False):
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        t = self.time[self.downsample_probe]
+        prestim_x = x[t<0]
+        prestim_t = t[t<0]
+        prestim_hold = holding_cost(prestim_t,prestim_x)
+        return prestim_hold/np.diff([prestim_t[0],prestim_t[-1]])
 
 
     ## plotting functions

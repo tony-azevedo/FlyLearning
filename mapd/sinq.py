@@ -44,7 +44,15 @@ class Sinq(object):
             # Remove Table objects from the DataFrame
             stripped_df['Table'] = stripped_df['Table'].apply(lambda x: None )
             return stripped_df
-        
+    
+    
+    def drop_tables(self):
+        """Save the DataFrame to the file. remove tables first"""
+        if self.df is not None:
+            stripped_df = self._prepare_for_export()
+            self.df = stripped_df
+        else:
+            raise ValueError("DataFrame is empty. Nothing to save.")
 
     @property
     def columns(self):
@@ -119,7 +127,7 @@ class Sinq(object):
         return self.T
 
 
-    def _add_row(self, row, table=None, overwrite=True):
+    def _add_row(self, row, table=None, overwrite=False):
         """
         Private function to add or update a row in the DataFrame based on the provided Table object.
         This function is called internally by add_table.
@@ -137,7 +145,11 @@ class Sinq(object):
 
         # Update all computed attributes for the row
         table.extract_trial_properties()
+        row['Table'] = table
         for attr in self.df.columns:
+            if (isinstance(row[attr], float) and not(np.isnan(row[attr]))) and not overwrite:
+                print(f"Skipping {attr} for {row.name}: {row[attr]}")
+                continue
             print(f"Adding {attr} for {row.name}")
             row, attr_list = self._get_table_attr(row,attr)
 
@@ -203,7 +215,7 @@ class Sinq(object):
         return row, [attr]
 
 
-    def sync(self, *, overwrite:bool=False) -> None:
+    def sync(self, *, overwrite:bool=False) -> pd.Series:
         """
         Synchronize the current Sinq by filling in missing columns
         based on the existing Table objects in the DataFrame.
@@ -228,13 +240,21 @@ class Sinq(object):
                 row = self._add_row(row, overwrite=overwrite)
             else:
                 print('Restoring Table and all values for {}'.format(row['parquet']))
-                table = self.restore_table(dayflycell=row.index)
+                table = self.restore_table(dayflycell=row.name)
                 row = self._add_row(row, table=table, overwrite=overwrite)
 
             return row  # Ensure the row is returned after modification
-
-        self.df = self.df.apply(re_add_table_values,axis=1)
-        self.save()
+        
+        for dfc in self.df.index:
+            print
+            row = self.df.loc[dfc].copy()
+            row = re_add_table_values(row)
+            self.df.loc[dfc] = row
+            # self.df = self.df.apply(re_add_table_values,axis=1)
+            print(f'Saving sync {self.__repr__()}')
+            self.save()
+            self.drop_tables()
+        return row
 
 
     def sync_column(self, column=None, overwrite=True):
@@ -263,36 +283,41 @@ class Sinq(object):
         self.save()
 
 
-    def restore_table(self, dayflycell=None):
+    def restore_table(self, dayflycell=None,overwrite = False):
         """
         Restore a table from the DataFrame using the dayflycell index.
         If the table is not found, it will return None.
         """
-        if dayflycell is None and self.df is None:
-            raise KeyError('Sinq has no Tables, nothing to restore')
-        elif dayflycell is None:
-            dayflycell = self.df.index[0]
-            print('Restoring first table: '.format(dayflycell))
-        
-        def make_table(parquet_path):
-            if pd.isna(parquet_path):
+        if dayflycell is None or self.df is None:
+            raise KeyError('Sinq has no Tables or no dayflycell given')
+                
+        def make_table(row):
+            if pd.isna(row['parquet']):
                 raise KeyError('parquet_path is empty')
-            T = Table(parquet_path)
-            return T
+            
+            if not row['Table'] is None and not overwrite:
+                print(f'Table {dayflycell} in sinq')
+                return row['Table']
+            else:
+                T = Table(row['parquet'])
+                return T
 
         if dayflycell == 'All' or dayflycell == 'all':
             print('Restoring all tables: {}'.format(self.df.index.tolist() if self.df is not None else [],))
-            self.df['Table'] = self.df['parquet'].apply(make_table)
+            self.df['Table'] = self.df[['parquet','Table']].copy().apply(make_table, axis=1)
             self.T = self.df['Table'][0]
-        elif self.df is None or dayflycell not in self.df.index:
+            return self.T
+        
+        if dayflycell not in self.df.index:
             print(f"No table found for {dayflycell}.")
             return None
+        
         else:
-            parquet_path = self.df.at[dayflycell, 'parquet']
-            self.T = make_table(parquet_path=parquet_path)
-            self.df.at[dayflycell, 'Table'] = self.T
-
-        return self.T
+            T = make_table(self.df.loc[dayflycell,['parquet','Table']])
+            self.df.at[dayflycell, 'Table'] = T
+            self.T = T
+            return T
+        
     
 
     def merge_sinq(self, other_sinq):

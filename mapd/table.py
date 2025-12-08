@@ -202,11 +202,13 @@ class Table:
 
         def create_trial(row):
             trial_number = row.name  # Use the index (trial_number)
+            # print(trial_number)
             file_name = self._generate_filename(trial_number)
             return Trial(file_name)
         
         print('Getting trials')
         self.df['Trial'] = self.df.swifter.progress_bar(self.progress_bar).apply(create_trial,axis=1,result_type='expand')
+        # self.df['Trial'] = self.df.apply(create_trial,axis=1,result_type='expand')
         return self.df['Trial']
         
 
@@ -276,6 +278,25 @@ class Table:
             newcols[prop] = s
         self.df = self.df.assign(**newcols)
         return self.df[prop_list]
+    
+
+    def as_outcome_recompute(self,
+                                group_name: str = TRIAL_METADATA_GROUP,
+                                rewrite_attrs: bool = False):
+
+        # newcols = {}
+        # for prop in prop_list:
+        s = self.df['Trial'].map(lambda tr: tr.get_as_outcome(rerun=True,verbose=True))
+        s = s.astype(_category_dict['as_outcome'])
+        newcols = {'as_outcome':s}
+        s = self.df['Trial'].map(lambda tr: tr.is_probe)
+        newcols['is_probe'] = s
+        s = self.df['Trial'].map(lambda tr: tr.is_rest)
+        newcols['is_rest'] = s
+        
+        print(newcols.keys())
+        self.df = self.df.assign(**newcols)
+        return self.df[['as_outcome','is_probe','is_rest']]
 
     
     def probe_positions_df(self,df=None):
@@ -546,6 +567,64 @@ class Table:
         self.exclude_trials()
 
 
+    def find_outcome_sequence(self,outcome_sequence:list = None):
+        """
+        A successful trial is a trial where the fly enters the target and stays at least 2 trials.
+        """
+        if outcome_sequence is None:
+            KeyError('Need to input a sequence')
+
+        if 'as_outcome' not in self.df.columns:
+            self.extract_trial_properties(prop_list=['as_outcome'])
+        
+        if 'on_target' not in self.df.columns:
+            self.extract_trial_properties(prop_list=['on_target'])
+        
+        as_off = (self.df['as_outcome'] == 'as_off') | (self.df['as_outcome'] == 'as_off_late')
+        no_as_no_mv = (self.df['as_outcome'] == 'no_as_no_mv')
+        no_as = no_as_no_mv | (self.df['as_outcome'] == 'no_as_mv')
+        rest = (self.df['as_outcome'] == 'rest')
+        probe = (self.df['as_outcome'] == 'probe')
+
+        on_target = ((self.df['on_target']>.9) & rest) | ((self.df['on_target']>.9) & probe)
+
+        s = pd.Index(self.df.index).to_series(index=self.df.index)
+        next_contig = s.shift(-1).sub(s).eq(1)
+
+        outcome_list=[]
+        shft=0
+        for outcome in outcome_sequence:
+            # take as_off trials. Ask if the next two trials are either no_as or on_target
+            if outcome == 'as_off':
+                outcome_list.append(as_off.shift(shft))
+            elif outcome== 'no_as_no_mv':
+                outcome_list.append(no_as_no_mv.shift(shft))
+            elif outcome=='no_as_mv':
+                outcome_list.append(no_as_no_mv.shift(shft))
+            shft = shft-1
+            # no_as_1 = no_as.shift(-1) | on_target.shift(-1)
+            # no_as_no_mv_1 = no_as_no_mv.shift(-1) | on_target.shift(-1)
+            # no_as_no_mv_2 = no_as_no_mv.shift(-2) | on_target.shift(-2)
+        matches=None
+        for ol in outcome_list:
+            if matches is None:
+                matches=ol
+            else:
+                matches = matches & ol
+
+
+        sequence_matches = self.df[['as_outcome','on_target']].copy()
+        sequence_matches['matches'] = matches
+        
+        print('no_as_no_mv: {}; no_as_mv: {}; as_off: {}; matches: {}'.format(
+            (self.df['as_outcome']=='no_as_no_mv').sum(),
+            (self.df['as_outcome']=='no_as_mv').sum(),
+            (self.df['as_outcome']=='as_off').sum(),
+            sequence_matches['matches'].sum(),
+        ))
+        return sequence_matches
+
+    
     def find_successful_trials(self):
         """
         A successful trial is a trial where the fly enters the target and stays at least 2 trials.
@@ -555,29 +634,46 @@ class Table:
         
         if 'on_target' not in self.df.columns:
             self.extract_trial_properties(prop_list=['on_target'])
-
+        
         as_off = (self.df['as_outcome'] == 'as_off') | (self.df['as_outcome'] == 'as_off_late')
-        no_as = (self.df['as_outcome'] == 'no_as_no_mv') | (self.df['as_outcome'] == 'no_as_mv')
+        no_as_no_mv = (self.df['as_outcome'] == 'no_as_no_mv')
+        no_as = no_as_no_mv | (self.df['as_outcome'] == 'no_as_mv')
         rest = (self.df['as_outcome'] == 'rest')
         probe = (self.df['as_outcome'] == 'probe')
 
         on_target = ((self.df['on_target']>.9) & rest) | ((self.df['on_target']>.9) & probe)
 
+        s = pd.Index(self.df.index).to_series(index=self.df.index)
+        next_contig = s.shift(-1).sub(s).eq(1)
+
         # take as_off trials. Ask if the next two trials are either no_as or on_target
         no_as_1 = no_as.shift(-1) | on_target.shift(-1)
-        no_as_2 = no_as.shift(-2) | on_target.shift(-2)
-        self.df['success'] = as_off & no_as_1 & no_as_2
+        no_as_no_mv_1 = no_as_no_mv.shift(-1) | on_target.shift(-1)
+        no_as_no_mv_2 = no_as_no_mv.shift(-2) | on_target.shift(-2)
+        self.df['soft_success'] = next_contig & as_off & no_as_1 # & no_as_2
+        self.df['hard_success'] = next_contig & as_off & no_as_no_mv_1 & no_as_no_mv_2
+        self.df['success'] = self.df['soft_success'] | self.df['hard_success']
 
-    
+        print('no_as_no_mv: {}; no_as_mv: {}; as_off: {}; success: {}; hard_success: {}'.format(
+            (self.df['as_outcome']=='no_as_no_mv').sum(),
+            (self.df['as_outcome']=='no_as_mv').sum(),
+            (self.df['as_outcome']=='as_off').sum(),
+            self.df['success'].sum(),
+            self.df['hard_success'].sum(),
+        ))
+
     def classify_successful_trials(self):
         """ Classify successful trials into settle or enter.
         """
 
         self.df['success_type'] = 'unsuccessful'
+        
+        trials = self.df.loc[['Trial','success']].copy()
+        trials['next_trial'] = trials['Trial'].shift(-1)
+        trials = trials.loc[trials['success']]
 
         if 'next_trial' not in self.df.columns:
             self.df['next_trial'] = self.df['Trial'].shift(-1)
-
         def classify_success(row):
             if row['success']:
                 tr1 = row['Trial']
@@ -586,8 +682,6 @@ class Table:
                 state = 'lo' if tr1.pyasState == 'lo' else 'hi'
                 xpos = tr1.params['pyasXPosition']
                 wdth = tr1.params['pyasWidth']
-
-                
 
                 if row['next_trial'] is not None:
                     next_pp = row['next_trial'].probe_position
@@ -599,7 +693,7 @@ class Table:
             elif not row['success']:
                 return 'unsuccessful'
 
-        self.df['success_type'] = self.df.apply(classify_success, axis=1)
+        self.df['success_type'] = self.df.copy().apply(classify_success, axis=1)
 
         if 'target_enter_side' not in self.df.columns:
             self.extract_trial_properties(prop_list=['on_target'])
@@ -608,18 +702,8 @@ class Table:
 
         # settle
 
+        # enter
 
-
-
-    def compute_successful_enter_trials(self):
-        """
-        Compute the number of successful enter trials.
-        """
-        if 'as_outcome' not in self.df.columns:
-            raise ValueError("DataFrame does not contain 'as_outcome' column.")
-        
-        successful_enter_trials = self.df[self.df['as_outcome'] == 'enter'].shape[0]
-        return successful_enter_trials
     
 
     # ---------------------------------------------------------
@@ -665,6 +749,9 @@ class Table:
         self._genotype = self._genotype.replace('.', '_')
         self._genotype = self._genotype.replace('>', '_')
         self._genotype = self._genotype.replace('/', '_')
+        self._genotype = self._genotype.replace('[', '')
+        self._genotype = self._genotype.replace(']', '')
+        self._genotype = self._genotype.replace('*', '')
         return self._genotype
 
 

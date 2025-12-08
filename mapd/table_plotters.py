@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as patches
+import matplotlib.colors as mcolors
 
 import seaborn as sns
 import pickle
@@ -101,7 +102,7 @@ def plot_some_trials(self,index,from_zero=True,savefig=False,format=None):
 
 
 @auto_ax_and_save(default_title="Probe position")
-def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,format=None):
+def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,format=None,force_pos=False):
     if index.empty:
         raise ValueError('No such trials. Try: T._excluded_df.loc[a:b]')
 
@@ -115,6 +116,11 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
         print(f'Index is incorrectly formatted. If using a single trial, enclose the number in brackets to get a dataframe []')
         raise
     
+    if force_pos:
+        if not from_zero:
+            print('If force/position is positive, need to compute from probeZero (from_zero = True)')
+            from_zero = True
+
     time_list = []
     probe_position_list = []
     arduino_output_list = []
@@ -128,18 +134,23 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
     cumulative_time_offset = 0
 
     for tr in trial_df.Trial:
-        probeZero = tr.params['probeZero']
+        probeZero = tr.probeZero
         probe_position = getattr(tr,'probe_position',None)
         
         arduino_output = getattr(tr,'arduino_output',None)
         time_array = tr.time 
     
-        target_y = tr.params['pyasXPosition']
-        target_width = tr.params['pyasWidth']
+        target_y = tr.pyasXPosition
+        target_width = tr.pyasWidth
         if from_zero:
             probe_position = getattr(tr,'probe_position',None)-probeZero
             target_y = target_y-probeZero
         
+        if force_pos:
+            probe_position = -probe_position
+            target_y = -target_y
+            target_width = -target_width
+
         tgt_clr = tr._tgt_clrs[int(tr.params['blueToggle'])]
     
         arduino_output = -arduino_output*target_width + target_y + target_width
@@ -183,9 +194,14 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
     if not from_zero:
         ax.set_ylim([cumulative_probeZero.min() - 500, cumulative_probeZero.max() + 20])
         ax.axhline(y=cumulative_probeZero.min(), xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
-    else:
+    elif not force_pos:
         ax.set_ylim([0 - 500, 0 + 20])
         ax.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+    else:
+        ax.set_ylim([0 - 20, 0 + 500])
+        ax.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
+
+    return ax
 
 
 
@@ -272,10 +288,13 @@ def plot_some_phys(self,index=None,from_zero=False,ax=None,savefig=False,format=
     ax.set_xlim(cumulative_time[0], cumulative_time[-1])
 
 
-def plot_outcomes(self,savefig=False,format=None):
+def plot_outcomes(self,savefig=False,format=None,fig_dir=None):
     # Plot each row as a vertical tick mark at its categorical position
     if not 'as_outcome' in self.df.columns:
         self.extract_trial_properties()
+
+    if not 'success' in self.df.columns:
+        self.find_successful_trials()
     
     fig = Figure(figsize=(6.4, 6.4), dpi=200)
     canvas = FigureCanvas(fig)
@@ -323,12 +342,12 @@ def plot_outcomes(self,savefig=False,format=None):
         ax.text(tr_min,rec_min,'NC cut', fontsize=8, ha='left', va='center')
     
     # Indicate Blue or Green LED
-    if '_filtercube_status_cat' in self.df.columns:
+    if 'filtercube_status' in self.df.columns:
         rec_min = self.df['as_outcome'].cat.categories.get_loc('info')
 
         print(rec_min)
         for led in ['blue','green']:
-            T_rows = self.df.loc[self.df['_filtercube_status_cat']==led]
+            T_rows = self.df.loc[self.df['filtercube_status']==led]
             tr_min = T_rows.index.min()
             tr_max = T_rows.index.max()
             rect = patches.Rectangle(
@@ -388,11 +407,29 @@ def plot_outcomes(self,savefig=False,format=None):
         blueclr = (0.339, 0.4235, 0.95)
         ax.scatter(x_positions, y_positions, marker='|', s=200, color=blueclr)
 
+    success_trials = self.df.loc[(self.df['success']) & (~self.df['hard_success'])]
+    if not success_trials.empty:
+        y_positions = success_trials['as_outcome'].cat.codes
+        x_positions = success_trials.index
+        mag_clr = (0.,.7,0.)
+        ax.scatter(x_positions, y_positions, marker='|', s=200, color=mag_clr)
+
+    hard_success_trials = self.df.loc[self.df['hard_success']]
+    if not hard_success_trials.empty:
+        y_positions = hard_success_trials['as_outcome'].cat.codes
+        x_positions = hard_success_trials.index
+        cyan_clr = (0., 1., 1.)
+        ax.scatter(x_positions, y_positions, marker='|', s=200, color=cyan_clr)
+
     if savefig or format:
+        if fig_dir is None:
+            fig_dir = self.fig_folder
         if format is None:
             format = 'png'
-        fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_as_outcomes.{format}',format=format)
-    
+        
+        os.makedirs(fig_dir, exist_ok=True)
+        fig.savefig(f'{fig_dir}/{self.dfc}_{self.genotype}__as_outcomes.{format}',format=format)
+
     return fig, ax
 
 
@@ -515,9 +552,8 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
     probe_position_hm_df = self.ds_and_align_probe_position_hmdf()
 
     fig = Figure(figsize=(8, 8), dpi=300)
-    canvas = FigureCanvas(fig)
     ax = fig.add_subplot(111)
-    # sns.heatmap(probe_position_df, cmap="rocket", ax=ax, cbar_kws={'label': 'probe_position'})
+    
     rocket_cmap = sns.color_palette("rocket", as_cmap=True)
     
     if cmin is None:
@@ -531,7 +567,7 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
 
         is_sequential = index.is_monotonic_increasing and (index[1:] - index[:-1]).min() == 1
         if not is_sequential:
-            KeyError('Index is not sequential')
+            print(f'Careful. Index for {self.dfc} is non-monotomic')
 
         probe_position_hm_df = probe_position_hm_df.loc[index]
 
@@ -606,6 +642,7 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
     
     if savefig or (not format is None):
         format = format or 'png'
+        os.makedirs(f'{self.fig_folder}', exist_ok=True)
         fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_heatmap.{format}',format=format)
 
 
@@ -616,14 +653,14 @@ def plot_sensory_responses(self,target=None,piezo_step=None):
     index = self.df.loc[(self.df['pyas_target'] == target) and (self.df['pyas_target'] == piezo_step)]
 
 
-def plot_trial_computations(self,method_name: str,savefig=False,format='png'):
+def plot_trial_computations(self,method_name: str,savefig=False,format='png',fig_dir =None):
     """Plot a value from the dataframe across trials."""
     if method_name not in self.df.columns:
         raise ValueError(f"Column '{method_name}' not found in DataFrame. "
                          f"Call compute_trial_method('{method_name}') first.")
     
     fig = Figure(figsize=(8, 6), dpi=200)
-    canvas = FigureCanvas(fig)
+    # canvas = FigureCanvas(fig)
     ax = fig.add_subplot(111)
     y = self.df[method_name]
     rec_min = 0
@@ -633,14 +670,19 @@ def plot_trial_computations(self,method_name: str,savefig=False,format='png'):
     
     x_positions = self.df.index
     ax.plot(x_positions, y, linestyle='-', color='black',linewidth=0.5)
+    ax.scatter(x_positions, y, marker='.', s=5, color='black')
 
     # Label the y-axis with the category names
     ax.set_xlabel("Trial Index")
     ax.set_ylabel(method_name)
-    ax.set_title(f"{self._dfc} {self.genotype} {method_name}")
+    ax.set_title(f"{self.dfc} {self.genotype} {method_name}")
     
     if savefig:
-        fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_{method_name}.{format}',format=format)
+        if fig_dir is None:
+            fig_dir = self.fig_folder
+        
+        os.makedirs(fig_dir, exist_ok=True)
+        fig.savefig(f'{fig_dir}/{self.dfc}_{self.genotype}_{method_name}.{format}',format=format)
     
     return fig, ax
 
@@ -657,6 +699,8 @@ def plot_plotting_context(self,ax=None,rec_min=0,rec_max=1):
 
         tr_min = T_rows.index.min()
         tr_max = T_rows.index.max()
+        if not np.isscalar(rec_max):
+            rec_max = rec_max[0]
         rect = patches.Rectangle(
                 (tr_min, rec_min),        # Bottom-left corner of the rectangle
                 (tr_max - tr_min + 1),       # Width (covers the specified rows)
