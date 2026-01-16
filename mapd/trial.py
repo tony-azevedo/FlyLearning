@@ -472,6 +472,7 @@ class Trial:
             target_min = self.pyasXPosition
             target_max = self.pyasXPosition + self.pyasWidth
 
+            # For cases when the fly is not under control
             if self.is_probe:
                 if self._as_duration==0:
                     # but is the probe in the target the entire time?
@@ -485,6 +486,7 @@ class Trial:
                 else:
                     self._as_outcome = 'timeout'
 
+            
             else:
                 if self._as_duration==0:
                     # but is the probe in the target the entire time?

@@ -102,7 +102,7 @@ def plot_some_trials(self,index,from_zero=True,savefig=False,format=None):
 
 
 @auto_ax_and_save(default_title="Probe position")
-def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,format=None,force_pos=False):
+def plot_some_probe_groups(self,index=None,from_zero=True,fig=None, ax=None,savefig=False,format=None,force_pos=False):
     if index.empty:
         raise ValueError('No such trials. Try: T._excluded_df.loc[a:b]')
 
@@ -201,7 +201,7 @@ def plot_some_probe_groups(self,index=None,from_zero=True,ax=None,savefig=False,
         ax.set_ylim([0 - 20, 0 + 500])
         ax.axhline(y=0, xmin=0, xmax=1, color=(0.5,0.5,0.5), linestyle='--', label='probe_zero')
 
-    return ax
+    return fig,ax
 
 
 

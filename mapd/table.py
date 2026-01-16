@@ -14,6 +14,7 @@ importlib.reload(table_movie_maker)
 importlib.reload(table_export_methods)
 
 import os
+import warnings
 import subprocess
 import pandas as pd
 pd.options.mode.chained_assignment = 'raise'
@@ -388,9 +389,8 @@ class Table:
 
         filtered_df = self.df.loc[index]
         if not filter is None:
-            # for key in filter:
-            #     probe_positions.loc[ppi,key] = self.df.loc[ppi,key]
             for key in filter:
+                print(key)
                 filtered_df = filtered_df.loc[filtered_df[key]==filter[key],:]
 
         if bin_min is None:
@@ -463,16 +463,10 @@ class Table:
         else:
             index = self.df.index
             if not trial_min is None:
-                try:
-                    index = index[index.get_loc(trial_min):]
-                except KeyError as e:
-                    index = index
+                index = index[index>=trial_min]
 
             if not trial_max is None:
-                try:
-                    index = index[:index.get_loc(trial_max)+1]
-                except KeyError as e:
-                    index = index
+                index = index[index<=trial_max]
 
         # Assign the value
         # Validate value length if assigning a sequence
@@ -480,7 +474,8 @@ class Table:
             if len(index) != len(value):
                 raise ValueError(f"Length of value ({len(value)}) does not match length of index ({len(index)})")
         
-        self.df[column_name] = np.nan
+        if column_name not in self.df.columns:
+            self.df[column_name] = np.nan
         self.df.loc[index, column_name] = value
 
         # Try to infer dtype if not provided
@@ -752,6 +747,8 @@ class Table:
         self._genotype = self._genotype.replace('[', '')
         self._genotype = self._genotype.replace(']', '')
         self._genotype = self._genotype.replace('*', '')
+        self._standardize_genotype()
+
         return self._genotype
 
 
@@ -773,6 +770,40 @@ class Table:
         for key in keys:
             self.extract_trial_properties([key])
 
+
+
+    def _standardize_genotype(self):
+        geno_map = {
+            '31H05_pJFRC7':                    'w;pJFRC7;31H05-GAL4',
+            '+;31H05-Gal4_pJFRC7':             '+;pJFRC7;31H05-GAL4',
+            'SS61350_pJFRC7':                  '+;SS61350_pJFRC7',
+            '+;pJFRC7;SS61350':                '+;SS61350_pJFRC7',
+            'ss61350_pJFRC7':                  '+;SS61350_pJFRC7',
+            'iav_Kir2_1':                      'w;iav-GAL4_UAS-Kir21',
+            'iav-Gal4_+;+;UAS-Kir2_1':         '+;iav-GAL4_UAS-Kir21',
+            '+;iav-Gal4_UAS-Kir2_1':           '+;iav-GAL4_UAS-Kir21',
+            '+;TH-Gal4_UAS-Kir2_1':            '+;UAS-Kir21;TH-GAL4',
+            '+;TH-Gal4_pJFRC7':                '+;pJFRC7;TH-GAL4',
+            'w, NorpA':                        'w,NorpA',
+            'ppk-Gal4;10XUAS-ChR in WT':       '+;ppk-GAL4;10XUAS-ChR',
+            'norpAE55':                        '+,NorpA',
+            '+;pFJRC7;+':                      '+;pJFRC7;+',
+            'norpA':                           'w,NorpA',
+            'Hot-Cell-Gal4 (test)':            '+;Hot-Cell-GAL4_pJFRC7;10XUAS-ChR',
+            'Hot-Cell-LexA_Chr;81A06_pJFRC7':  '+;Hot-Cell-LexA_Chr;81A06-GAL4_pJFRC7',
+            'Hot-Cell-LexA_Chr;35c09_pJFRC7':  '+;Hot-Cell-LexA_Chr;35C09-GAL4_pJFRC7',
+            'Hot-Cell-LexA_Chr;35C09_pJFRC7':  '+;Hot-Cell-LexA_Chr;35C09-GAL4_pJFRC7',
+            'Hot-Cell-LexA_Chr;78E05_pJFRC7':  '+;Hot-Cell-LexA_Chr;78E05-GAL4_pJFRC7',
+            'Hot-Cell-LexA_Chr;31H05_pJFRC7':  '+;Hot-Cell-LexA_Chr;31H05-GAL4_pJFRC7',
+        }
+        if self._genotype in geno_map.keys():
+            self._genotype = geno_map[self._genotype]
+        elif self._genotype in geno_map.keys():
+            print('Genotype {} is standardized'.format(self._genotype))
+        else:
+            warnings.warn('Genotype {} not standardized'.format(self._genotype))
+
+        return self._genotype
 
     # ---------------------------------------------------------
     # Dunder Methods
