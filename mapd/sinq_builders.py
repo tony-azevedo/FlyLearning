@@ -28,3 +28,26 @@ def build_composite_sinq(
         sinq.merge_sinq(src, overwrite=overwrite)
 
     return sinq
+
+
+def subset_sinq(
+    source: Sinq,
+    *,
+    rows: list[str],
+    name: str,
+    fresh: bool = True,
+) -> Sinq:
+    """
+    Create a new Sinq containing only a subset of rows from a source Sinq.
+    """
+    sinq = Sinq(sinqname=name, fresh=fresh)
+
+    # Copy only selected rows
+    sinq.df = source.df.loc[rows].copy()
+
+    # Optional provenance
+    sinq._sources = [source]
+    sinq._subset_rows = rows
+
+    sinq.save()
+    return sinq

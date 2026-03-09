@@ -92,7 +92,7 @@ class NotesMixin:
 
         if append and current["text"]:
             current["text"] += "\n" + text
-        else:
+        elif current["text"]:
             current["text"] = text
 
         if tags:
@@ -138,24 +138,44 @@ class NotesMixin:
         self.df.at[dayflycell, self.NOTES_COLUMN] = self._empty_note()
         self.save()
 
-    # ---------- plotting helpers ----------
 
-    def notes_to_hovertext(self) -> pd.Series:
+    def add_tags(self, dayflycell: str, tags):
         """
-        Returns a Series of strings suitable for hover labels.
+        Add one or more tags to an existing note without modifying note text.
         """
         self._ensure_notes_column()
 
-        def fmt(note):
-            n = self._normalize_note(note)
-            parts = [n["text"]] if n["text"] else []
-            if n["tags"]:
-                parts.append(f"tags: {', '.join(n['tags'])}")
-            if n["author"]:
-                parts.append(f"by {n['author']}")
-            return "<br>".join(parts)
+        if isinstance(tags, str):
+            tags = {tags}
+        else:
+            tags = set(tags)
 
-        return self.df[self.NOTES_COLUMN].apply(fmt)
+        note = self._normalize_note(self.df.at[dayflycell, self.NOTES_COLUMN])
+
+        note["tags"] = sorted(set(note.get("tags", [])) | tags)
+
+        self.df.at[dayflycell, self.NOTES_COLUMN] = note
+        self.save()
+
+
+    def remove_tags(self, dayflycell: str, tags):
+        """
+        Remove one or more tags from a note without modifying note text.
+        """
+        self._ensure_notes_column()
+
+        if isinstance(tags, str):
+            tags = {tags}
+        else:
+            tags = set(tags)
+
+        note = self._normalize_note(self.df.at[dayflycell, self.NOTES_COLUMN])
+
+        note["tags"] = sorted(set(note.get("tags", [])) - tags)
+
+        self.df.at[dayflycell, self.NOTES_COLUMN] = note
+        self.save()
+
 
     def has_tag(self, tag: str) -> pd.Series:
         """
@@ -236,6 +256,27 @@ class NotesMixin:
         return matches
 
 
+    # ---------- plotting helpers ----------
+
+    def notes_to_hovertext(self) -> pd.Series:
+        """
+        Returns a Series of strings suitable for hover labels.
+        """
+        self._ensure_notes_column()
+
+        def fmt(note):
+            n = self._normalize_note(note)
+            parts = [n["text"]] if n["text"] else []
+            if n["tags"]:
+                parts.append(f"tags: {', '.join(n['tags'])}")
+            if n["author"]:
+                parts.append(f"by {n['author']}")
+            return "<br>".join(parts)
+
+        return self.df[self.NOTES_COLUMN].apply(fmt)
+
+
+
 class Sinq(NotesMixin):
     def __init__(self, fresh: bool = False, **kwargs):
         self.sinqname = kwargs.get('sinqname', 'all_Tables')
@@ -296,10 +337,15 @@ class Sinq(NotesMixin):
             return stripped_df
     
     
-    def drop_tables(self):
+    def drop_tables(self,index=None):
         """Save the DataFrame to the file. remove tables first"""
-        if self.df is not None:
+        if (self.df is not None) and (index is None):
             stripped_df = self._prepare_for_export()
+            self.df = stripped_df
+        elif index is not None:
+            # Remove Table objects from the DataFrame
+            stripped_df = self.df.copy()
+            stripped_df.loc[index,'Table'] = stripped_df.loc[index,'Table'].apply(lambda x: None )
             self.df = stripped_df
         else:
             raise ValueError("DataFrame is empty. Nothing to save.")
@@ -727,7 +773,7 @@ class Sinq(NotesMixin):
         return self.df["notes"].apply(extract)
 
 
-    def display_df(self,show_tags=False) -> pd.DataFrame:
+    def display_df(self,show_tags=True) -> pd.DataFrame:
         """
         Human-readable view of the Sinq DataFrame.
         """

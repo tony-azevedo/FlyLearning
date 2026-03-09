@@ -657,6 +657,7 @@ class Table:
             self.df['hard_success'].sum(),
         ))
 
+  
     def classify_successful_trials(self):
         """ Classify successful trials into settle or enter.
         """
@@ -795,6 +796,9 @@ class Table:
             'Hot-Cell-LexA_Chr;35C09_pJFRC7':  '+;Hot-Cell-LexA_Chr;35C09-GAL4_pJFRC7',
             'Hot-Cell-LexA_Chr;78E05_pJFRC7':  '+;Hot-Cell-LexA_Chr;78E05-GAL4_pJFRC7',
             'Hot-Cell-LexA_Chr;31H05_pJFRC7':  '+;Hot-Cell-LexA_Chr;31H05-GAL4_pJFRC7',
+            'ppk-Gal4;10XUAS-ChR in WT':       '+;ppk-GAL4;10XUAS-ChR',
+            '+;ppk-GAL4;10XUAS-ChR':           '+;ppk-GAL4;10XUAS-ChR',
+            'Hot-Cell-Gal4_ChrinWT':           '+;Hot-cell-GAL4;10XUAS-ChR',
         }
         if self._genotype in geno_map.keys():
             self._genotype = geno_map[self._genotype]
