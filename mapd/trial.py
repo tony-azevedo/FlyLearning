@@ -23,10 +23,16 @@ mpl.rcParams['svg.fonttype'] = 'none'     # keep text editable in SVG
 mpl.rcParams['font.family'] = 'Arial'
 mpl.rcParams['font.size'] = 11
 
-k_spring_constant = 0.0829 #uN/um
 TRIAL_METADATA_GROUP = 'meta'
 
 import mapd.sentinels as s
+from .kinematics import (
+    k_spring_constant,
+    velocity, acceleration, mean_velocity, rms_velocity, jerk_energy,
+    power, work, holding_cost, positive_effort, effort,
+    detect_movement_bouts, detect_bouts_across_trials,
+    STATE_REST, STATE_DRIFT, STATE_MOVE, _STATE_LABEL, _STATE_COLORS,
+)
 
 
 def _decode_h5_string(arr):
@@ -114,72 +120,7 @@ def _set_ascii_attr(h5obj, key: str, value: str):
     h5obj.attrs.create(key, value, dtype=h5py.string_dtype(encoding='ascii'))
 
 
-def velocity(t,x):
-    v = np.gradient(x, t)
-    # assert x.shape == t.shape
-    return v
-
-
-def acceleration(t,x):
-    """A measure of effort in motor control"""
-    a = np.gradient(velocity(t,x), t)
-    return a
-
-
-def mean_velocity(t,x):
-    """Integral of abs(velocity)"""
-    vigor = np.mean(np.abs(velocity(t,x)))
-    return vigor
-
-
-def rms_velocity(t,x):
-    """Weights faster movements more"""
-    v = velocity(t,x)
-    v_rms = np.sqrt(np.mean(v**2))
-    return v_rms
-
-
-def jerk_energy(t,x):
-    """A measure of effort in motor control"""
-    jerk = np.gradient(acceleration(t,x),t)
-    jerk_energy = np.sum(jerk**2) * np.diff(t[0:1])
-    return jerk_energy
-
-
-def power(t,x):
-    v = velocity(t,x)
-    power = -k_spring_constant * x * v
-    return power
-
-
-def work(t,x):       
-    """Work Done Against the Spring"""
-    p = power(t,x)
-    work = np.trapezoid(power,t)
-    return work
-
-
-def holding_cost(t,x):
-    """Holding Cost (integrated potential energy)"""
-    U = 0.5 * k_spring_constant * x**2
-    holding_cost = np.trapezoid(U, t)
-    return holding_cost
-
-
-def positive_effort(t,x):
-    '''Assumes p is never negative'''
-    v = velocity(t,x)
-    pos_vel = np.clip(v, a_min=0, a_max=None)
-    power = k_spring_constant * x * pos_vel
-    effort = np.trapezoid(np.clip(power, a_min=0, a_max=None), t)
-    return effort
-
-
-def effort(t,x, alpha=1e-6, beta = 1e-2):
-    """Effort Cost Function, symetric, Not in use"""
-    v = velocity(t,x)
-    effort = np.trapezoid(alpha * v**2 + beta * x**2, t)
-    return effort
+# Signal primitives and bout detection are imported from mapd.kinematics above.
 
 
 
@@ -623,6 +564,33 @@ class Trial:
         x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
         t = self.time[self.downsample_probe].squeeze()
         return effort(t,x)
+
+
+    def detect_bouts(self, start_time=None, v_th=30.0, v_rest=5.0, Dt=0.5, fallback='none', smooth_window=0.05):
+        """
+        Detect movement bouts in this trial's downsampled probe trace.
+
+        Thin wrapper around ``mapd.kinematics.detect_movement_bouts``.
+        x is sign-corrected: positive = toward target.
+
+        Parameters
+        ----------
+        start_time : float or None — search only from this time onward
+                     (e.g. self.as_duration to find post-AS bouts)
+        v_th       : MOVE threshold (um/s), default 30
+        v_rest     : REST threshold (um/s), default 5
+        Dt         : minimum REST duration (s), default 0.5
+        fallback   : 'none' | 'drift' | 'end'
+
+        Returns
+        -------
+        bouts, states, t, x  — see detect_movement_bouts for full spec
+        """
+        t = self.time[self.downsample_probe].squeeze()
+        x = -(self.probe_position[self.downsample_probe].squeeze() - self.probeZero)
+        return detect_movement_bouts(t, x, start_time=start_time,
+                                     v_th=v_th, v_rest=v_rest, Dt=Dt, fallback=fallback,
+                                     smooth_window=smooth_window)
 
 
     def prestim_v_rms(self,debug = False):
