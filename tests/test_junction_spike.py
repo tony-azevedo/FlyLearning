@@ -45,18 +45,19 @@ def run(save_html=True):
 
     row = hard_rows.loc[TRIAL_NUM]
     trial1 = row['Trial']
+    print(trial1.total_duration)
+    print(trial1.params['stimDurInSec']+trial1.params['postDurInSec'])
     trial2 = row['next_trial']
+    print(trial2.total_duration)
 
     bouts, states, t, x = kin.detect_bouts_across_trials(
         [trial1, trial2],
         classifier=kin._classify_states_schmitt,
-        v_th=V_TH, v_rest=V_REST,
     )
 
     # ── Junction spike check ──────────────────────────────────────────────────
     # The junction is at the boundary between trial1 and trial2 samples.
-    n_tr1 = len(trial1.time[trial1.downsample_probe])
-    junction_idx = n_tr1
+    junction_idx = int(np.searchsorted(t, trial1.total_duration))
 
     # Check a window of 1s around the junction
     fs = 1.0 / np.median(np.diff(t))

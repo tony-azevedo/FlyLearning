@@ -156,7 +156,7 @@ class Trial:
         self._time = None
         self._trialtime = None
         self._downsample_probe = None
-        self._frame_length_mode = None # this is the most likely number of samples per Pyas frame
+        self.frame_length_mode = None # this is the most likely number of samples per Pyas frame
 
         self._probegroups = ['probe_position']
         self._ephysgroups = ['voltage_1','voltage_2','current_extEMG','current_1','current_2']
@@ -376,21 +376,21 @@ class Trial:
         change_points = np.where(np.diff(arr) != 0)[0] + 1  # take the first element of tuple from where, and add 1 to get the next change point
 
         sequence_lengths = np.diff(np.concatenate(([0], change_points, [len(arr)])))
-        self._frame_length_mode = mode(sequence_lengths).mode
-        if self._frame_length_mode > 500:
-            print('Most common frame length is {} samples. Pyas probably stopped working.'.format(self._frame_length_mode))
+        self.frame_length_mode = mode(sequence_lengths).mode
+        if self.frame_length_mode > 500:
+            print('Most common frame length is {} samples. Pyas probably stopped working.'.format(self.frame_length_mode))
             self.exclude(reason='Pyas stopped working')
 
         time_zero_index = self.params['preDurInSec'] * self.params['sampratein']
         totalsamps = len(arr)
 
         # start the down sample vector at time_zero_index, go to total samps
-        after_indices = np.arange(time_zero_index, totalsamps, self._frame_length_mode)
+        after_indices = np.arange(time_zero_index, totalsamps, self.frame_length_mode)
         # add the last index if it is not there (if DT doesn't fit)
         if not totalsamps-1 in after_indices:
             after_indices = np.append(after_indices,totalsamps-1)
 
-        before_indices = np.arange(time_zero_index-self._frame_length_mode, -1, -self._frame_length_mode)[::-1]
+        before_indices = np.arange(time_zero_index-self.frame_length_mode, -1, -self.frame_length_mode)[::-1]
         if not 0 in before_indices:
             before_indices = np.insert(before_indices, 0, 0, axis=0)
 

@@ -180,6 +180,10 @@ class Table:
             self.get_trials()
 
         tru_arr = np.array([[1]])
+        null_trials = self.df['Trial'].isna()
+        if null_trials.any():
+            print(f'Dropping {null_trials.sum()} trials that failed to load')
+            self.df = self.df[~null_trials]
         self.df.loc[self.df.index,'excluded'] = self.df.Trial.apply(lambda tr: np.array_equal(tru_arr,tr.excluded))
         to_exclude = self.df[self.df['excluded'] == True]
         if self._excluded_df is None:
@@ -203,9 +207,12 @@ class Table:
 
         def create_trial(row):
             trial_number = row.name  # Use the index (trial_number)
-            # print(trial_number)
             file_name = self._generate_filename(trial_number)
-            return Trial(file_name)
+            try:
+                return Trial(file_name)
+            except OSError as e:
+                print(f'  Trial {trial_number}: skipping — {e}')
+                return None
         
         print('Getting trials')
         self.df['Trial'] = self.df.swifter.progress_bar(self.progress_bar).apply(create_trial,axis=1,result_type='expand')
@@ -658,6 +665,35 @@ class Table:
         ))
 
   
+    def find_sudden_punishment_trials(self):
+        """
+        Sudden punishment: as_off trials preceded by no_as trials.
+        Mirror of success: success = as_off + no_as + no_as,
+                           sudden_punishment = no_as + no_as + as_off.
+
+        Sets columns:
+          soft_sudden_punishment — preceded by 1 no_as (no_as_no_mv or no_as_mv)
+          sudden_punishment      — preceded by 2 consecutive no_as trials
+        """
+        if 'as_outcome' not in self.df.columns:
+            self.extract_trial_properties(prop_list=['as_outcome'])
+
+        as_off = (self.df['as_outcome'] == 'as_off') | (self.df['as_outcome'] == 'as_off_late')
+        no_as = (self.df['as_outcome'] == 'no_as_no_mv') | (self.df['as_outcome'] == 'no_as_mv')
+
+        s = pd.Index(self.df.index).to_series(index=self.df.index)
+        prev_contig = s.shift(1).sub(s).eq(-1)
+        prev2_contig = s.shift(2).sub(s).eq(-2)
+
+        no_as_m1 = no_as.shift(1)   # trial before
+        no_as_m2 = no_as.shift(2)   # two trials before
+
+        self.df['soft_sudden_punishment'] = as_off & no_as_m1 & prev_contig
+        self.df['sudden_punishment'] = as_off & no_as_m1 & no_as_m2 & prev_contig & prev2_contig
+
+        print(f'soft_sudden_punishment: {self.df["soft_sudden_punishment"].sum()}; '
+              f'sudden_punishment: {self.df["sudden_punishment"].sum()}')
+
     def classify_successful_trials(self):
         """ Classify successful trials into settle or enter.
         """

@@ -5,7 +5,16 @@
       "Bash(python3 -c \"import json; nb = json.load\\(open\\('op_cond_Figure2_how_they_do_it.ipynb'\\)\\); [print\\(f'Cell {i} \\({cell.get\\(\\\\\"cell_type\\\\\", \\\\\"unknown\\\\\"\\)}\\): {cell.get\\(\\\\\"source\\\\\", []\\)[:200]}'\\) for i, cell in enumerate\\(nb['cells']\\)]\" 2>/dev/null | head -100)",
       "Bash(cd \"C:\\\\Users\\\\tony\\\\Code\\\\FlyLearning\" && python -c \"\nimport json\nwith open\\('op_cond_Figure2_how_they_do_it.ipynb'\\) as f:\n    nb = json.load\\(f\\)\nfor i, cell in enumerate\\(nb['cells']\\):\n    print\\(i, cell.get\\('id','?'\\), cell['cell_type'], repr\\(''.join\\(cell['source']\\)[:60]\\)\\)\n\")",
       "Bash(cd \"C:\\\\Users\\\\tony\\\\Code\\\\FlyLearning\" && python -c \"\nimport json\nwith open\\('op_cond_Figure2_how_they_do_it.ipynb'\\) as f:\n    nb = json.load\\(f\\)\nfor i, cell in enumerate\\(nb['cells'][:12]\\):\n    print\\(i, repr\\(cell.get\\('id', 'NO_ID'\\)\\)\\)\n\")",
-      "mcp__jupyter__get_cells_info"
+      "mcp__jupyter__get_cells_info",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "Bash(conda list:*)",
+      "Bash(pip list:*)",
+      "Bash(conda run:*)",
+      "Bash(xxd -l 8 \"D:/Data/210917/210917_F2_C1/LEDFlashTriggerPiezoControl_Raw_210917_F2_C1_1.mat\")",
+      "Bash(xxd -l 8 \"D:/Data/210917/210917_F2_C1/LEDFlashTriggerPiezoControl_Raw_210917_F2_C1_3.mat\")",
+      "Bash(xxd -l 16 \"D:/Data/210917/210917_F2_C1/LEDFlashTriggerPiezoControl_Raw_210917_F2_C1_1.mat\")",
+      "Bash(xxd -l 16 \"D:/Data/210917/210917_F2_C1/LEDFlashTriggerPiezoControl_Raw_210917_F2_C1_3.mat\")"
     ],
     "defaultMode": "acceptEdits"
   }

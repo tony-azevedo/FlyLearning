@@ -27,6 +27,10 @@ import numpy as np
 # ── Physical constant ─────────────────────────────────────────────────────────
 k_spring_constant = 0.0829  # uN/um
 
+# ── Default detection thresholds (tuned on 250304_F3_C1) ─────────────────────
+V_TH   = 60.0   # um/s — enter MOVE
+V_REST =  30.0   # um/s — exit MOVE / enter REST
+
 
 # ── Signal primitives ─────────────────────────────────────────────────────────
 
@@ -82,6 +86,85 @@ def positive_effort(t, x):
     return np.trapezoid(np.clip(pwr, a_min=0, a_max=None), t)
 
 
+def bout_cumulative_metrics(bouts, t, x, trials=None):
+    """
+    Cumulative v_rms and positive effort from the first bout start to the
+    last bout end before the final prolonged rest within the trial-1 window.
+
+    When *trials* is provided the window is capped at the end of trials[0].
+    All bouts that start within that window are included, so the metric
+    spans REST and DRIFT gaps between bouts — only ending where the last
+    bout's trailing REST begins.
+
+    When *trials* is ``None`` only the first bout is used.
+
+    Parameters
+    ----------
+    bouts  : list of bout dicts (from detect_movement_bouts)
+    t, x   : full trace arrays (from detect_movement_bouts)
+    trials : list of Trial objects or None
+
+    Returns
+    -------
+    dict with keys:
+        bt          — time array for the window
+        cum_v_rms   — cumulative RMS velocity at each sample
+        cum_effort  — cumulative positive effort at each sample
+        v_rms       — scalar final v_rms
+        effort      — scalar final effort
+    All arrays are empty (length-0) if no bouts were found.
+    """
+    t = np.asarray(t)
+    x = np.asarray(x)
+
+    if not bouts:
+        empty = np.array([])
+        return dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
+                    v_rms=0.0, effort=0.0)
+
+    si = bouts[0]['start_idx']
+
+    if trials is not None and len(trials) >= 1:
+        # Find the last bout that starts within trial 1
+        t1_dur = trials[0].total_duration - trials[1].params['preDurInSec']
+        last_bout = bouts[0]
+        for b in bouts:
+            if b['start_time'] < t1_dur:
+                last_bout = b
+            else:
+                break
+        # Cap at trial-1 end in sample space
+        t1_end_idx = int(np.searchsorted(t, t1_dur))
+        ei = min(last_bout['end_idx'], t1_end_idx)
+    else:
+        ei = bouts[0]['end_idx']
+
+    ei = min(ei, len(t))
+    bt = t[si:ei]
+    bx = x[si:ei]
+
+    if len(bt) < 2:
+        empty = np.array([])
+        return dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
+                    v_rms=0.0, effort=0.0)
+
+    bv = velocity(bt, bx)
+    cum_v_rms = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
+
+    bp_pwr = np.clip(k_spring_constant * bx * np.clip(bv, 0, None), 0, None)
+    bdt = np.diff(bt)
+    cum_effort = np.concatenate([[0.0],
+                     np.cumsum(0.5 * (bp_pwr[:-1] + bp_pwr[1:]) * bdt)])
+
+    return dict(
+        bt=bt,
+        cum_v_rms=cum_v_rms,
+        cum_effort=cum_effort,
+        v_rms=float(cum_v_rms[-1]),
+        effort=float(cum_effort[-1]),
+    )
+
+
 def effort(t, x, alpha=1e-6, beta=1e-2):
     """Symmetric effort cost function (not currently in active use)."""
     v = velocity(t, x)
@@ -126,7 +209,7 @@ def _rolling_rms(v, n):
     return out
 
 
-def _classify_states_schmitt(v, x=None, v_th=120.0, v_rest=80.0, Dt=0.2, fs=200.0,
+def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=None,
                              smooth_window=0.05, x_excursion_min=8.0):
     """
     Schmitt-trigger (hysteretic) state classifier.
@@ -143,6 +226,8 @@ def _classify_states_schmitt(v, x=None, v_th=120.0, v_rest=80.0, Dt=0.2, fs=200.
     threshold is v_rest (not v_th), so there is no spurious splitting on
     brief velocity dips within a continuous movement.
     """
+    if fs is None:
+        raise ValueError("fs must be provided (sampling rate in Hz)")
     n_smooth = max(1, int(round(smooth_window * fs)))
     speed    = _rolling_rms(v, n_smooth)
     n_rest   = max(1, int(round(Dt * fs)))
@@ -215,7 +300,7 @@ def _classify_states_schmitt(v, x=None, v_th=120.0, v_rest=80.0, Dt=0.2, fs=200.
     return state
 
 
-def _classify_states(v, x=None, v_th=120.0, v_rest=80.0, Dt=0.2, fs=200.0,
+def _classify_states(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=None,
                      smooth_window=0.05, x_excursion_min=8.0, move_gap=0.3):
     """
     Classify a velocity array into REST / DRIFT / MOVE per sample.
@@ -241,6 +326,8 @@ def _classify_states(v, x=None, v_th=120.0, v_rest=80.0, Dt=0.2, fs=200.0,
     # explicit exit threshold (v_rest makes a natural choice).  Consider if
     # rolling-RMS alone leaves too many spurious REST patches inside bouts.
     """
+    if fs is None:
+        raise ValueError("fs must be provided (sampling rate in Hz)")
     n_smooth = max(1, int(round(smooth_window * fs)))
     speed  = _rolling_rms(v, n_smooth)
     n_rest = max(1, int(round(Dt * fs)))
@@ -303,6 +390,11 @@ def _build_trace(trial1, trial2=None):
 
     Returns (t, x) where x = -(probe_position - probeZero), i.e. positive
     toward target, matching the convention used in Trial methods.
+
+    Trial 2's time is offset by trial1.total_duration.  Any samples in the
+    concatenated trace closer together than the nominal downsampled step
+    (trial1.frame_length_mode / sampratein) are dropped — this prevents
+    spurious velocity spikes at the trial junction.
     """
     xs, ts = [], []
     for tr in ([trial1] if trial2 is None else [trial1, trial2]):
@@ -310,10 +402,18 @@ def _build_trace(trial1, trial2=None):
         xs.append(x_raw[tr.downsample_probe])
         ts.append(tr.time[tr.downsample_probe].squeeze())
     if trial2 is not None:
-        dT = float(trial1.time[-1] - trial1.time[0])
-        dt = ts[0][1] - ts[0][0]   # downsampled step size
-        ts[1] = ts[1] + dT + dt
-    return np.concatenate(ts), np.concatenate(xs)
+        ts[1] = ts[1] + trial1.total_duration
+    t = np.concatenate(ts)
+    x = np.concatenate(xs)
+    if trial2 is not None:
+        # Drop samples that are too close together at the junction
+        nominal_dt = trial1.frame_length_mode / trial1.params['sampratein']
+        dt_arr = np.diff(t)
+        keep = np.ones(len(t), dtype=bool)
+        keep[1:] = dt_arr >= 0.5 * nominal_dt
+        t = t[keep]
+        x = x[keep]
+    return t, x
 
 
 def _rle(states, offset=0):
@@ -356,10 +456,10 @@ def _resolve_bout_end(segs, t, fallback):
 def detect_movement_bouts(
     t, x,
     start_time=0.0,
-    v_th=120.0,
-    v_rest=80.0,
+    v_th=V_TH,
+    v_rest=V_REST,
     Dt=0.2,
-    fallback='none',
+    fallback='end',
     smooth_window=0.05,
     x_excursion_min=8.0,
     move_gap=0.3,
@@ -383,13 +483,13 @@ def detect_movement_bouts(
                        default 0.05 — handles brief zero-crossings at reversals
     x_excursion_min  : float or None — MOVE runs with peak-to-peak position range
                        below this (um) are demoted to DRIFT; default 8.0
-    move_gap         : float or None — only used by the default classifier
-                       (_classify_states); non-MOVE gaps shorter than this (s) are
-                       filled in as MOVE; default 0.3
+    move_gap         : float or None — only used by _classify_states;
+                       non-MOVE gaps shorter than this (s) are filled in as MOVE;
+                       default 0.3
     classifier       : callable or None — state classifier function with signature
                            f(v, x, v_th, v_rest, Dt, fs, smooth_window, x_excursion_min)
-                       Defaults to _classify_states (threshold-based with move_gap).
-                       Pass _classify_states_schmitt for hysteretic classification.
+                       Defaults to _classify_states_schmitt (hysteretic classification).
+                       Pass _classify_states for threshold-based with move_gap.
     junction_indices : list of int or None — sample indices where trial boundaries
                        fall in the concatenated trace; velocity is zeroed there to
                        prevent spurious spikes from position discontinuities.
@@ -485,7 +585,7 @@ def detect_bouts_across_trials(trials, **kwargs):
     t, x = _build_trace(trials[0], trials[1] if len(trials) > 1 else None)
     junctions = []
     if len(trials) > 1:
-        junctions.append(len(trials[0].time[trials[0].downsample_probe]))
+        junctions.append(int(np.searchsorted(t, trials[0].total_duration)))
     if len(trials) > 2:
         for tr in trials[2:]:
             junctions.append(len(t))
@@ -495,7 +595,7 @@ def detect_bouts_across_trials(trials, **kwargs):
             x_extra = -(tr.probe_position - tr.probeZero).squeeze()[tr.downsample_probe]
             t = np.concatenate([t, t_extra])
             x = np.concatenate([x, x_extra])
-    return detect_movement_bouts(t, x, junction_indices=junctions, **kwargs)
+    return detect_movement_bouts(t, x, junction_indices=None, **kwargs)
 
 
 def plot_bouts(
@@ -504,12 +604,16 @@ def plot_bouts(
     t,
     x,
     trials=None,
-    v_th=120.0,
-    v_rest=80.0,
+    v_th=V_TH,
+    v_rest=V_REST,
     smooth_window=0.05,
     start_time=None,
     title=None,
     show_target=True,
+    show_grid=False,
+    show_drift_patches=True,
+    cum_vrms_all_bouts=False,
+    context_trial=None,
 ):
     """
     Interactive Plotly figure for inspecting bout detection results.
@@ -527,6 +631,15 @@ def plot_bouts(
     start_time  : float or None — vertical dotted line marking the search start
     title       : str or None — figure title
     show_target : bool — draw the pyasState target band from trials[0]
+    show_grid   : bool — show plotly background grid lines (default True)
+    show_drift_patches : bool — draw light gray patches for DRIFT periods (row 1)
+    cum_vrms_all_bouts : bool — if True, row 3 shows cumulative v_rms across all
+                         MOVE bouts within trial 1, resetting on REST; if False
+                         (default), shows cumulative v_rms over the first bout only
+    context_trial : Trial or None — preceding trial shown on rows 1 & 2 with
+                    negative time (shifted so it ends at t[0]).  State-colored
+                    on row 1, speed shown on row 2.  Does not affect bout
+                    detection or cumulative metric panels (rows 3 & 4).
 
     Returns
     -------
@@ -534,8 +647,8 @@ def plot_bouts(
 
     Row 1 — probe position coloured by REST/DRIFT/MOVE; bouts highlighted gold
     Row 2 — rolling-RMS speed with v_th / v_rest lines
-    Row 3 — cumulative v_rms over the first bout
-    Row 4 — cumulative positive effort over the first bout
+    Row 3 — cumulative v_rms over the first bout (or all bouts in trial 1)
+    Row 4 — cumulative positive effort over the first bout (or all bouts in trial 1)
 
     Typical usage
     -------------
@@ -585,8 +698,10 @@ def plot_bouts(
         subplot_titles=[
             'Probe position (um, +toward target)',
             'Rolling-RMS speed (um/s)',
-            'Cumulative v_rms from t=0 (um/s)',
-            'Cumulative positive effort from t=0 (uN·um)',
+            'Cum v_rms — all bouts to trial-1 end (um/s)' if cum_vrms_all_bouts
+                else 'Cumulative v_rms from t=0 (um/s)',
+            'Cum effort — all bouts to trial-1 end (uN·um)' if cum_vrms_all_bouts
+                else 'Cumulative positive effort from t=0 (uN·um)',
         ],
     )
 
@@ -606,6 +721,55 @@ def plot_bouts(
             row=1, col=1,
         )
 
+    # Context trial — full state-colored trace on rows 1 & 2 with negative time
+    if context_trial is not None:
+        ctx = context_trial
+        ctx_idx = ctx.downsample_probe
+        ctx_t = ctx.time[ctx_idx].squeeze()
+        ctx_x = -(ctx.probe_position[ctx_idx].squeeze() - ctx.probeZero)
+        # Shift so context ends at t[0]
+        ctx_t = ctx_t - ctx_t[-1] + t[0]
+
+        # State-classify the context trace
+        ctx_fs = 1.0 / np.median(np.diff(ctx_t))
+        ctx_v = velocity(ctx_t, ctx_x)
+        ctx_v = _zero_short_dt_velocity(ctx_v, ctx_t, smooth_window, ctx_fs)
+        ctx_n_sm = max(1, int(round(smooth_window * ctx_fs)))
+        ctx_speed = _rolling_rms(ctx_v, ctx_n_sm)
+        ctx_states = _classify_states_schmitt(
+            ctx_v, x=ctx_x, v_th=v_th, v_rest=v_rest, Dt=0.2,
+            fs=ctx_fs, smooth_window=smooth_window, x_excursion_min=8.0)
+
+        # Row 1: position colored by state (faded)
+        for state_val, color in _plotly_colors.items():
+            mask = ctx_states == state_val
+            if not mask.any():
+                continue
+            fig.add_trace(
+                go.Scattergl(
+                    x=ctx_t[mask], y=ctx_x[mask],
+                    mode='markers',
+                    marker=dict(color=color, size=2, opacity=0.3),
+                    name=_STATE_LABEL[state_val],
+                    legendgroup=_STATE_LABEL[state_val],
+                    showlegend=False,
+                ),
+                row=1, col=1,
+            )
+
+        # Row 2: speed trace (faded)
+        fig.add_trace(
+            go.Scattergl(
+                x=ctx_t, y=ctx_speed,
+                mode='lines',
+                line=dict(color='gray', width=1),
+                opacity=0.3,
+                name='speed (context)',
+                showlegend=False,
+            ),
+            row=2, col=1,
+        )
+
     # Bout highlight bands (row 1)
     for b in bouts:
         si = b['start_idx']
@@ -615,6 +779,29 @@ def plot_bouts(
             fillcolor='gold', opacity=0.2, line_width=0,
             row=1, col=1,
         )
+
+    # Drift patches (row 1)
+    if show_drift_patches:
+        drift_mask = states == STATE_DRIFT
+        in_drift = False
+        drift_start = 0
+        for i in range(len(drift_mask)):
+            if drift_mask[i] and not in_drift:
+                drift_start = i
+                in_drift = True
+            elif not drift_mask[i] and in_drift:
+                fig.add_vrect(
+                    x0=float(t[drift_start]), x1=float(t[i - 1]),
+                    fillcolor='lightgray', opacity=0.3, line_width=0,
+                    row=1, col=1,
+                )
+                in_drift = False
+        if in_drift:
+            fig.add_vrect(
+                x0=float(t[drift_start]), x1=float(t[-1]),
+                fillcolor='lightgray', opacity=0.3, line_width=0,
+                row=1, col=1,
+            )
 
     # Row 2: rolling-RMS speed
     fig.add_trace(
@@ -653,24 +840,14 @@ def plot_bouts(
         except Exception:
             pass   # silently skip if trial lacks target metadata
 
-    # Rows 3 & 4: cumulative v_rms and effort, scoped to the first bout
-    if bouts:
-        si = bouts[0]['start_idx']
-        ei = bouts[0]['end_idx']
-        bt = t[si:ei]
-        bv = velocity(bt, x[si:ei])
-        bx = x[si:ei]
-
-        cum_v_rms  = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
-
-        bp_pwr     = np.clip(k_spring_constant * bx * np.clip(bv, 0, None), 0, None)
-        bdt        = np.diff(bt)
-        cum_effort = np.concatenate([[0.0],
-                         np.cumsum(0.5 * (bp_pwr[:-1] + bp_pwr[1:]) * bdt)])
-    else:
-        bt = np.array([])
-        cum_v_rms  = np.array([])
-        cum_effort = np.array([])
+    # Rows 3 & 4: cumulative v_rms and effort
+    metrics = bout_cumulative_metrics(
+        bouts, t, x,
+        trials=trials if cum_vrms_all_bouts else None,
+    )
+    bt         = metrics['bt']
+    cum_v_rms  = metrics['cum_v_rms']
+    cum_effort = metrics['cum_effort']
 
     # Row 3: cumulative v_rms over bout
     fig.add_trace(
@@ -712,11 +889,17 @@ def plot_bouts(
         height=900,
         legend=dict(orientation='v', x=1.02, y=1),
         hovermode='x unified',
+        plot_bgcolor='white' if not show_grid else None,
     )
-    fig.update_xaxes(title_text='time (s)', row=4, col=1)
+    t_min = float(ctx_t[0]) if context_trial is not None else float(t[0])
+    fig.update_xaxes(range=[t_min, float(t[-1])], title_text='time (s)', row=4, col=1)
     fig.update_yaxes(title_text='position (um)',    range=[-10, 500], row=1, col=1)
-    fig.update_yaxes(title_text='speed (um/s)',     row=2, col=1)
+    fig.update_yaxes(title_text='speed (um/s)',     range=[0, 200], row=2, col=1)
     fig.update_yaxes(title_text='cum v_rms (um/s)', row=3, col=1)
     fig.update_yaxes(title_text='cum effort (uN·um)', row=4, col=1)
+
+    if not show_grid:
+        fig.update_xaxes(showgrid=False)
+        fig.update_yaxes(showgrid=False)
 
     return fig

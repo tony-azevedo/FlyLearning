@@ -1,0 +1,7 @@
+Analysis questions and TODO items
+========================================
+
+# Are successes more likely after both edges have been sampled?
+
+# Are AS-off trials similar to success in their distributions of movement vigor?
+
