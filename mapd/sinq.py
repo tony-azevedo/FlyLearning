@@ -1,7 +1,8 @@
 import os
+import re
 import numpy as np
 import pandas as pd
-from .helpers import get_day_fly_cell, get_file, default_data_directory
+from .paths import CellId, get_day_fly_cell, get_file, default_data_directory
 from mapd.table import Table
 import warnings
 from collections import Counter
@@ -90,13 +91,19 @@ class NotesMixin:
             self.df.at[dayflycell, self.NOTES_COLUMN]
         )
 
+        # if append and current["text"]:
+        #     current["text"] += "\n" + text
+        # elif current["text"]:
+        #     current["text"] = text
+
         if append and current["text"]:
-            current["text"] += "\n" + text
-        elif current["text"]:
+            current["text"] = current["text"] + "\n" + text
+        else:
             current["text"] = text
 
-        if tags:
-            current["tags"] = sorted(set(current["tags"]).union(tags))
+        if tags is not None:
+            current["tags"] = sorted(set(tags))   # replace, not union
+            # current["tags"] = sorted(set(current["tags"]).union(tags))
 
         if author:
             current["author"] = author
@@ -106,6 +113,8 @@ class NotesMixin:
 
         self.df.at[dayflycell, self.NOTES_COLUMN] = current
         self.save()
+
+        
 
 
     def datetime_from_dayflycell(dayflycell: str) -> datetime:
@@ -373,12 +382,20 @@ class Sinq(NotesMixin):
         Add a table to the Sinq object, either from a Table object or a string path.
         This is the main function for adding or updating a table.
         """
+        # Re-resolve Table at call time so %autoreload 2 doesn't break us: if
+        # mapd.table was reloaded, our module-level `Table` is stale but
+        # mapd.table.Table is current, and isinstance(T, Table) would fail
+        # against the stale class.
+        from .table import Table
         if isinstance(table, Table):
             self.T = table
             dayflycell = self.T.flycelldir
         elif isinstance(table, str):
-            day, fly, cell = get_day_fly_cell(table)
-            dayflycell = f'{day}_F{fly}_C{cell}'
+            if re.fullmatch(r"\d{6}_F\d+_C\d+", table):
+                dayflycell = table
+            else:
+                day, fly, cell = get_day_fly_cell(table)
+                dayflycell = f'{day}_F{fly}_C{cell}'
             if (self.df is not None) and (dayflycell in self.df.index):
                 # Check if values exist before adding
                 if not self.df.loc[dayflycell].apply(lambda x: isinstance(x, float) and np.isnan(x)).any():
@@ -402,16 +419,11 @@ class Sinq(NotesMixin):
         if self.df is None:
             self.df = pd.DataFrame([row_data], index=[dayflycell])
         elif not dayflycell in self.df.index or overwrite:
-            # If the dayflycell exists and overwrite is True, update the row with row_data
-            # Fill in the missing columns with existing values or NaN
-            for column in self.df.columns:
-                if column in row_data:
-                    self.df.loc[dayflycell, column] = row_data[column]  # Assign new data
-                else:
-                    # If the column isn't in row_data, keep the existing value or set to NaN
-                    print(column)
-                    if not (isinstance(self.df.loc[dayflycell, column],str)) and np.isnan(self.df.loc[dayflycell, column]):
-                        self.df.loc[dayflycell, column] = np.nan
+            # If the dayflycell exists and overwrite is True, update the row with row_data.
+            # Columns not in row_data keep their existing values.
+            for column, value in row_data.items():
+                if column in self.df.columns:
+                    self.df.loc[dayflycell, column] = value
 
         updated_row = self._add_row(self.df.loc[dayflycell].copy(), overwrite=overwrite)
         self.df.loc[dayflycell] = updated_row
@@ -455,59 +467,34 @@ class Sinq(NotesMixin):
         return row  # Return the updated row
     
     
-    def delete_table(self, table=None, overwrite=True):
+    def delete_table(self, table=None):
         """
-        Add a table to the Sinq object, either from a Table object or a string path.
-        This is the main function for adding or updating a table.
+        Remove a table's row from the Sinq, identified by a Table object or
+        a string (parquet path or ``dayflycell`` like ``'241121_F1_C1'``).
+        Saves the Sinq after the drop. No-op (with a warning) if the row
+        isn't present.
         """
+        from .table import Table  # re-resolve — see add_table for why
         if isinstance(table, Table):
-            self.T = table
-            dayflycell = self.T.flycelldir
+            dayflycell = table.flycelldir
         elif isinstance(table, str):
-            day, fly, cell = get_day_fly_cell(table)
-            dayflycell = f'{day}_F{fly}_C{cell}'
-            if (self.df is not None) and (dayflycell in self.df.index):
-                # Check if values exist before adding
-                if not self.df.loc[dayflycell].apply(lambda x: isinstance(x, float) and np.isnan(x)).any():
-                    print(f"Table and all computations for {dayflycell} already exists.")
-                    if not overwrite:
-                        print('Overwrite = {}. Skipping addition.'.format(overwrite))
-                        return
-                    else:
-                        print('Overwrite: {}'.format(overwrite))
-            self.T = Table(table)  # Create new table if it's a string
+            try:
+                dayflycell = str(CellId.parse(table))
+            except ValueError:
+                day, fly, cell = get_day_fly_cell(table)
+                dayflycell = f'{day}_F{fly}_C{cell}'
         else:
-            raise ValueError("Data must be a Table or string. Cannot be none")
+            raise ValueError("table must be a Table or a string identifier.")
 
-        # Use _add_row to handle the row addition or update
-        row_data = {
-            'parquet': table.parquet,
-            'Table': table,
-            'genotype': table.genotype
-        }
+        if self.df is None or dayflycell not in self.df.index:
+            print(f"{dayflycell} not in Sinq — nothing to delete.")
+            return
 
-        if self.df is None:
-            self.df = pd.DataFrame([row_data], index=[dayflycell])
-        elif not dayflycell in self.df.index or overwrite:
-            # If the dayflycell exists and overwrite is True, update the row with row_data
-            # Fill in the missing columns with existing values or NaN
-            for column in self.df.columns:
-                if column in row_data:
-                    self.df.loc[dayflycell, column] = row_data[column]  # Assign new data
-                else:
-                    # If the column isn't in row_data, keep the existing value or set to NaN
-                    print(column)
-                    if not (isinstance(self.df.loc[dayflycell, column],str)) and np.isnan(self.df.loc[dayflycell, column]):
-                        self.df.loc[dayflycell, column] = np.nan
-
-        updated_row = self._add_row(self.df.loc[dayflycell].copy(), overwrite=overwrite)
-        self.df.loc[dayflycell] = updated_row
-
-        # After updating the row, save the Sinq object
-        
-        self.df = self.df.sort_index()
+        self.df = self.df.drop(index=dayflycell)
+        if getattr(self, "T", None) is not None and getattr(self.T, "flycelldir", None) == dayflycell:
+            self.T = None
         self.save()
-        return self.T
+        print(f"Deleted {dayflycell} from Sinq.")
 
     def add_column(self, column_name, overwrite=False):
         """
@@ -611,6 +598,33 @@ class Sinq(NotesMixin):
             # self.df = self.df.apply(re_add_table_values,axis=1)
             print(f'Saving sync {self.__repr__()}')
             self.save()
+            self.drop_tables()
+        return row
+
+
+    def sync_row(self, dayflycell:str, *, overwrite:bool=True, drop_table:bool=False) -> pd.Series:
+        """Re-derive every scalar for a single dfc and save.
+
+        Restores the Table if it isn't already loaded, re-runs every
+        ``compute_*`` method (subject to ``overwrite``), saves the Sinq,
+        and returns the updated row. Unlike ``sync()``, the loaded Table
+        is left attached (``drop_table=False`` by default) so the caller
+        can keep using it.
+        """
+        if self.df is None or dayflycell not in self.df.index:
+            raise KeyError(f'{dayflycell!r} not in Sinq')
+
+        row = self.df.loc[dayflycell].copy()
+        if row['Table'] is None:
+            table = self.restore_table(dayflycell=dayflycell)
+            row['Table'] = table
+        else:
+            table = row['Table']
+
+        row = self._add_row(row, table=table, overwrite=overwrite)
+        self.df.loc[dayflycell] = row
+        self.save()
+        if drop_table:
             self.drop_tables()
         return row
 

@@ -1,10 +1,12 @@
-from .helpers import get_day_fly_cell, get_file, default_data_directory
+from . import paths as _paths
+from .paths import get_day_fly_cell, get_file, default_data_directory
 # from .table_plotters import plot_some_trials, plot_outcomes, plot_probe_distribution, probe_position_heatmap
 import types
 from . import table_plotters
 from . import table_movie_maker
 from . import table_export_methods
 from . import table_scalars
+from . import block_folding
 from mapd.trial import Trial
 from mapd.trial import TRIAL_METADATA_GROUP
 
@@ -79,6 +81,27 @@ class Table:
     """
     Table represents a set of trials from the FlySoundAcquisition software.
     """
+
+    # Protocol -> subclass registry, parallel to Trial._SUBCLASSES.
+    _SUBCLASSES: dict = {}
+
+    @classmethod
+    def register_protocol(cls, *protocols: str):
+        """Decorator: register a Table subclass for one or more protocol names."""
+        def deco(sub):
+            for p in protocols:
+                cls._SUBCLASSES[p] = sub
+            return sub
+        return deco
+
+    @classmethod
+    def for_path(cls, path) -> "Table":
+        """Factory: return the Table subclass registered for this parquet's
+        protocol, falling back to the base Table if none is registered."""
+        proto = _paths.parse_protocol_from_path(path)
+        tcls = cls._SUBCLASSES.get(proto, cls)
+        return tcls(str(path))
+
 
     def __init__(self,fn,fig_folder='./figpanels',progress_bar=False,add_probestate = False):
         self.topdir = default_data_directory(verbose=True)
@@ -209,7 +232,7 @@ class Table:
             trial_number = row.name  # Use the index (trial_number)
             file_name = self._generate_filename(trial_number)
             try:
-                return Trial(file_name)
+                return Trial.for_path(file_name)
             except OSError as e:
                 print(f'  Trial {trial_number}: skipping — {e}')
                 return None
@@ -234,17 +257,23 @@ class Table:
             tempdf.loc[self.df['pyasState'].isna(),'pyasState'] = 'no_state'
             target_tuples = list(zip(tempdf.pyasState,
                                     tempdf.probeZero,
-                                    tempdf.pyasXPosition-tempdf.probeZero, 
+                                    tempdf.pyasXPosition,
+                                    tempdf.pyasXPosition-tempdf.probeZero,
                                     tempdf.pyasWidth,))
-            tuple_counter = Counter(target_tuples) # Assume two most common target positions
-            for mct_item in tuple_counter.most_common(2):
-                mct = mct_item[0]
-                
-                target_dict = {'probeZero': mct[1],
-                            'pyasXPosition': mct[2],
-                            'pyasWidth': mct[3],
+            tuple_counter = Counter(target_tuples)
+            # Modal tuple per pyasState: probeZero drift within one state can put
+            # two variants of that state in the global top-2 and crowd the other
+            # state out entirely.
+            for state in ('lo', 'hi'):
+                state_items = [(t, c) for t, c in tuple_counter.items() if t[0] == state]
+                if not state_items:
+                    continue
+                mct, _ = max(state_items, key=lambda x: x[1])
+                self.targets[state] = {'probeZero': mct[1],
+                            'pyasXPosition_raw': mct[2],
+                            'pyasXPosition': mct[3],
+                            'pyasWidth': mct[4],
                             'pyasState': mct[0]}
-                self.targets[mct[0]] = target_dict
         else: 
             print('ProbeZero or pyasState not yet computed, collecting pyasXPosition and pyasWidth')
             target_tuples = list(zip(self.df.pyasXPosition, 
@@ -523,6 +552,36 @@ class Table:
         return self.df.swifter.progress_bar(self.progress_bar).apply(writer, axis=1)
         
 
+    def compute_state_positions(self, percentiles=(25, 50, 75),
+                                t_min=None, t_max=None,
+                                overwrite=False, **bout_kwargs):
+        """Populate per-trial probe-position percentiles within REST/DRIFT/MOVE.
+
+        Columns added: ``rest_p{p}``, ``drift_p{p}``, ``move_p{p}`` for each p
+        in ``percentiles``, plus ``rest_n``, ``drift_n``, ``move_n`` sample
+        counts.  Values are in the ``probe - probeZero`` frame.
+        """
+        from .bout_analysis import trial_state_positions
+        percentiles = tuple(np.atleast_1d(percentiles).tolist())
+        cols = []
+        for name in ('rest', 'drift', 'move'):
+            cols.append(f'{name}_n')
+            for p in percentiles:
+                cols.append(f'{name}_p{int(p)}')
+        if not overwrite and all(c in self.df.columns for c in cols):
+            return self.df[cols]
+
+        def _row(row):
+            return trial_state_positions(
+                row['Trial'], percentiles=percentiles,
+                t_min=t_min, t_max=t_max, **bout_kwargs)
+
+        res = self.df.swifter.progress_bar(self.progress_bar).apply(
+            _row, axis=1, result_type='expand')
+        self.df = self.df.assign(**{c: res[c] for c in cols})
+        return self.df[cols]
+
+
     def compute_trial_method(self, method_name: str,*,trial_col: str = 'Trial',debug: bool = False):
         """Compute a function on the trial object and add to the df"""
         if not hasattr(self.df[trial_col].iloc[0], method_name):
@@ -763,11 +822,8 @@ class Table:
 
 
     def _trial_file_name_template(self):
-        original_filename = self.parquet
-        parts = original_filename.split('_')
-        parts.insert(1, "Raw")
-        parts[-1] = parts[-1].replace("Table.parquet", "{x}.mat")
-        self._tfn_template = "_".join(parts)
+        self._tfn_template = _paths.trial_filename_template(self.parquet)
+        self.protocol = _paths.parse_protocol_from_path(self.parquet)
 
 
     def _generate_filename(self,tn):
@@ -790,7 +846,13 @@ class Table:
 
 
     def _bootstrap_meta_columns(self) -> None:
-        """Create df columns for every /meta key across all trials and fill values."""
+        """Create df columns for every /meta key across all trials and fill values.
+
+        Because the union of meta keys can include keys present on only some
+        trials (e.g. ``filtercube_status`` added partway through recording),
+        trials missing a key get NaN for that column instead of raising.
+        Explicit ``extract_trial_properties([...])`` calls remain strict.
+        """
         trials = self.df['Trial']
 
         # 1) discover union of keys
@@ -803,15 +865,27 @@ class Table:
         if not keys:
             return
 
-        # 2) pull each key’s value into a Series and install
+        # 2) pull each key's value into a Series; leave NaN where absent
+        newcols = {}
         for key in keys:
-            self.extract_trial_properties([key])
+            def _read(tr, k=key):
+                try:
+                    return tr._read_value_from_meta(k)
+                except AttributeError:
+                    return np.nan
+            vals = trials.map(_read)
+            if key in _category_dict:
+                vals = vals.astype(_category_dict[key])
+            newcols[key] = vals
+        self.df = self.df.assign(**newcols)
 
 
 
     def _standardize_genotype(self):
         geno_map = {
             '31H05_pJFRC7':                    'w;pJFRC7;31H05-GAL4',
+            '31H05_GFP':                       'w;pJFRC7;31H05-GAL4',
+            'pJFRC7;31H05-Gal4':               'w;pJFRC7;31H05-GAL4', 
             '+;31H05-Gal4_pJFRC7':             '+;pJFRC7;31H05-GAL4',
             'SS61350_pJFRC7':                  '+;SS61350_pJFRC7',
             '+;pJFRC7;SS61350':                '+;SS61350_pJFRC7',
@@ -824,6 +898,7 @@ class Table:
             'w, NorpA':                        'w,NorpA',
             'ppk-Gal4;10XUAS-ChR in WT':       '+;ppk-GAL4;10XUAS-ChR',
             'norpAE55':                        '+,NorpA',
+            'NorpA e55, no arista':            '+,NorpA',
             '+;pFJRC7;+':                      '+;pJFRC7;+',
             'norpA':                           'w,NorpA',
             'Hot-Cell-Gal4 (test)':            '+;Hot-Cell-GAL4_pJFRC7;10XUAS-ChR',
@@ -883,4 +958,8 @@ for name in dir(table_export_methods):
 for name in dir(table_scalars):
     obj = getattr(table_scalars, name)
     if isinstance(obj, types.FunctionType) and name.startswith("compute_"):
-        setattr(Table, name[len("compute_"):], obj)   
+        setattr(Table, name[len("compute_"):], obj)
+
+# Non-scalar time-series methods: attached explicitly so they don't get
+# picked up by Sinq's compute_* scalar convention.
+Table.folded_outcome_counts = block_folding.table_folded_outcome_counts

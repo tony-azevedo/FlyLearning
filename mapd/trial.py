@@ -1,4 +1,5 @@
-from .helpers import get_day_fly_cell, get_file, default_data_directory
+from . import paths as _paths
+from .paths import get_day_fly_cell, get_file, default_data_directory
 from os.path import join
 import h5py
 import hdf5storage as h5s
@@ -25,7 +26,9 @@ mpl.rcParams['font.size'] = 11
 
 TRIAL_METADATA_GROUP = 'meta'
 
-import mapd.sentinels as s
+# Module-private sentinel for "no default kwarg passed" (distinct from None).
+_MISSING = object()
+
 from .kinematics import (
     k_spring_constant,
     velocity, acceleration, mean_velocity, rms_velocity, jerk_energy,
@@ -141,6 +144,28 @@ class Trial:
         Returns a greeting message including the name of the entity.
     """
 
+    # Protocol -> subclass registry. Subclasses opt in with
+    # ``@Trial.register_protocol("LEDFlashTriggerPiezoControl", ...)``; the
+    # browser and other consumers dispatch through ``Trial.for_path``.
+    _SUBCLASSES: dict[str, type["Trial"]] = {}
+
+    @classmethod
+    def register_protocol(cls, *protocols: str):
+        """Decorator: register a Trial subclass for one or more protocol names."""
+        def deco(sub):
+            for p in protocols:
+                cls._SUBCLASSES[p] = sub
+            return sub
+        return deco
+
+    @classmethod
+    def for_path(cls, path) -> "Trial":
+        """Factory: return the Trial subclass registered for this file's protocol
+        (falls back to the base Trial if no subclass is registered)."""
+        proto = _paths.parse_protocol_from_path(path)
+        tcls = cls._SUBCLASSES.get(proto, cls)
+        return tcls(str(path))
+
 
     def __init__(self,fn):
         self.topdir = default_data_directory(verbose=False)
@@ -231,27 +256,17 @@ class Trial:
             # print(f'Reclassifying trial outcomes: {rerun}')
             self._classify_as_outcome(rerun=rerun,verbose=verbose)
 
-        elif self._as_outcome is None or not rerun:  #or self._as_outcome is s.MISSING
+        elif self._as_outcome is None or not rerun:
             try:
-                # val = self._read_string_from_meta('as_outcome')
                 val = self._read_value_from_meta('as_outcome')
-
-                if val is s.MISSING:
-                     self._classify_as_outcome(rerun=rerun)
-
-                if (val is not None) and (not val is s.MISSING):
+                if val is not None:
                     self._as_outcome = val
-            
                 if 'current_as_outcome' in self.groups:
                     self._remove_legacy_as_outcome_group()
-
-            except AttributeError as e:
-
+            except AttributeError:
                 if self._as_outcome is None:
                     self._classify_as_outcome(rerun=rerun)
-        
-        # if self._as_outcome is s.MISSING:
-        #     print('Missing a loop')
+
         return self._as_outcome
 
 
@@ -998,23 +1013,22 @@ class Trial:
         return []
     
         
-    def _read_value_from_meta(self, key, *, default=None, decode_strings=True, squeeze=True):
+    def _read_value_from_meta(self, key, *, default=_MISSING, decode_strings=True, squeeze=True):
         """
         Unified reader for /meta datasets:
         - Returns Python scalar for scalar datasets (and for 1-element arrays if squeeze=True).
         - Returns NumPy array for multi-element arrays.
         - If decode_strings=True, tries to return Python str(s) for string datasets.
+        - If the key is absent and no ``default`` kwarg was passed, raises AttributeError.
+          Any explicit ``default`` (including ``None``) is returned on miss.
         """
-        if default is None:
-            def_val = s.MISSING
-
         try:
             with h5py.File(join(self.path, self.fn), 'r') as f:
                 g = f.get(TRIAL_METADATA_GROUP)
                 if g is None or key not in g:
-                    if def_val is s.MISSING:
+                    if default is _MISSING:
                         raise AttributeError(f"{TRIAL_METADATA_GROUP}/{key} not found in {self.fn}")
-                    return def_val
+                    return default
 
                 dset = g[key]
                 val = dset[()]  # works for scalars and arrays
@@ -1028,9 +1042,8 @@ class Trial:
                 return val
 
         except Exception as e:
-            # print(f"Failed to read {key} from trial {self.fn}: {e}")
-            if not def_val is s.MISSING:
-                return def_val
+            if default is not _MISSING:
+                return default
             raise AttributeError(f"Failed to read {key} from trial {self.fn}: {e}")
 
 
@@ -1082,6 +1095,60 @@ class Trial:
     # ---------------------------------------------------------
     # Dunder Methods
     # ---------------------------------------------------------    
+    # ---------------------------------------------------------
+    # Trial Browser hook
+    # ---------------------------------------------------------
+    def draw_in_browser(self, *, ax_probe, ax_ephys,
+                        probe_line, ephys_lines: dict,
+                        show_probe: bool = True,
+                        active_channels=()) -> None:
+        """Populate the browser's pre-built artists with this trial's data.
+
+        The browser owns the Figure, Axes, and Line2D artists — this method
+        only mutates their data and autoscales. Subclasses override to add
+        protocol-specific overlays (LED onset markers, piezo cue bars, …);
+        they are responsible for cleaning up any extra artists they add.
+
+        Parameters
+        ----------
+        ax_probe, ax_ephys : matplotlib.axes.Axes
+            Probe (top) and ephys (bottom) axes, sharing x.
+        probe_line : matplotlib.lines.Line2D
+            The single probe trace artist.
+        ephys_lines : dict[str, matplotlib.lines.Line2D]
+            Line artist per ephys channel in the browser's checkbox set.
+        show_probe : bool
+            If False the probe line is emptied (user unchecked the box).
+        active_channels : iterable[str]
+            Channels currently checked. Inactive channels' lines are emptied.
+        """
+        t = self.time
+        ds = self.downsample_probe
+        if show_probe:
+            probe = -(self.probe_position[ds].squeeze() - self.probeZero)
+            probe_line.set_data(t[ds], probe)
+        else:
+            probe_line.set_data([], [])
+        ax_probe.relim()
+        ax_probe.autoscale_view()
+
+        active = set(active_channels)
+        for ch, line in ephys_lines.items():
+            if ch not in active:
+                line.set_data([], [])
+                continue
+            try:
+                y = np.asarray(getattr(self, ch)).squeeze()
+            except AttributeError:
+                line.set_data([], [])
+                continue
+            # Channel sample count may differ from t; truncate to common length.
+            n = min(len(t), len(y))
+            line.set_data(t[:n], y[:n])
+        ax_ephys.relim()
+        ax_ephys.autoscale_view()
+
+
     def __getattr__(self, name):
         """Lazy load: root datasets/groups first; then fall back to /meta/<name>; also expose meta_keys."""
         if name == "meta_keys":

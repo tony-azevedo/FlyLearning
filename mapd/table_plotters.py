@@ -19,6 +19,8 @@ import seaborn as sns
 import pickle
 from functools import wraps
 
+from . import block_folding
+
 import matplotlib as mpl
 mpl.rcParams.update(mpl.rcParamsDefault)  # reset to defaults
 mpl.rcParams['pdf.fonttype'] = 42         # embed fonts as text, not paths
@@ -687,6 +689,115 @@ def plot_trial_computations(self,method_name: str,savefig=False,format='png',fig
     return fig, ax
 
 
+def plot_state_positions(self, percentiles=(25, 50, 75),
+                         states=('rest', 'drift', 'move'),
+                         show_iqr=True, ax=None,
+                         savefig=False, format=None, fig_dir=None,
+                         **bout_kwargs):
+    """Plot per-trial probe-position percentiles across trials, split by
+    REST / DRIFT / MOVE state.
+
+    One marker per trial per (state, p50) with optional shaded p25-p75 band.
+    Target zones are drawn as horizontal bands for context, so it is easy to
+    see when a fly's rest position sits beyond the target.
+
+    Parameters
+    ----------
+    percentiles  : iterable of percentiles to compute; must include 50 if
+                   show_iqr is True (defaults give 25/50/75).
+    states       : subset of {'rest','drift','move'} to plot.
+    show_iqr     : if True and 25/75 are in ``percentiles``, draw the band.
+    bout_kwargs  : forwarded to ``Table.compute_state_positions`` →
+                   ``kin.detect_movement_bouts`` for recomputation.
+    """
+    from .kinematics import _STATE_COLORS, STATE_REST, STATE_DRIFT, STATE_MOVE
+
+    percentiles = tuple(np.atleast_1d(percentiles).tolist())
+    if isinstance(states, str):
+        states = (states,)
+    needed = []
+    for s in states:
+        for p in percentiles:
+            needed.append(f'{s}_p{int(p)}')
+    missing = [c for c in needed if c not in self.df.columns]
+    if missing:
+        print(f'Computing state-position columns: {missing}')
+        self.compute_state_positions(percentiles=percentiles, **bout_kwargs)
+
+    created_fig = None
+    if ax is None:
+        fig = Figure(figsize=(10, 5), dpi=200)
+        FigureCanvas(fig)
+        ax = fig.add_subplot(111)
+        created_fig = fig
+
+    state_int = {'rest': STATE_REST, 'drift': STATE_DRIFT, 'move': STATE_MOVE}
+
+    # Target bands (in flipped -(probe - probeZero) frame: positive = toward target).
+    y_lows, y_highs = [], []
+    for tgt_name, tgt in self.targets.items():
+        try:
+            y_top = -float(tgt['pyasXPosition'])
+            y_bot = y_top - float(tgt['pyasWidth'])
+        except (KeyError, TypeError):
+            continue
+        tgt_clr = _force_clrs[0 if tgt_name == 'lo' else 1]
+        ax.axhspan(y_top, y_bot, color=tgt_clr, alpha=0.25, lw=0,
+                   label=f'target ({tgt_name})')
+        y_lows.append(min(y_top, y_bot))
+        y_highs.append(max(y_top, y_bot))
+
+    x = self.df.index.to_numpy()
+    p_set = {int(p) for p in percentiles}
+    has_band = show_iqr and 25 in p_set and 75 in p_set
+
+    for s in states:
+        color = _STATE_COLORS[state_int[s]]
+        if has_band:
+            y_lo = self.df[f'{s}_p25'].to_numpy()
+            y_hi = self.df[f'{s}_p75'].to_numpy()
+            valid = ~np.isnan(y_lo) & ~np.isnan(y_hi)
+            if valid.any():
+                ax.fill_between(x, y_lo, y_hi, where=valid,
+                                color=color, alpha=0.15, lw=0)
+        for p in percentiles:
+            col = f'{s}_p{int(p)}'
+            y = self.df[col].to_numpy()
+            valid = ~np.isnan(y)
+            if not valid.any():
+                continue
+            is_median = int(p) == 50
+            # ax.plot(x[valid], y[valid],
+            #         '-', color=color,
+            #         lw=0.9 if is_median else 0.4,
+            #         alpha=0.9 if is_median else 0.4)
+            ax.scatter(x[valid], y[valid], marker='.',
+                       s=12 if is_median else 4, color=color,
+                       label=f'{s} p{int(p)}' if is_median else None)
+            y_lows.append(np.nanmin(y))
+            y_highs.append(np.nanmax(y))
+
+    rec_min = float(np.nanmin(y_lows)) if y_lows else 0.0
+    rec_max = float(np.nanmax(y_highs)) if y_highs else 1.0
+    self.plot_plotting_context(ax=ax, rec_min=rec_min, rec_max=rec_max)
+
+    ax.set_xlabel('Trial index')
+    ax.set_ylabel('−(Probe position − probeZero) (um)')
+    ax.set_title(f'{self._dfc} {self.genotype} per-state probe position')
+    ax.legend(loc='best', fontsize=8, ncol=2)
+    ax.set_ylim(rec_min, rec_max)
+
+    if savefig and created_fig is not None:
+        fmt = format or 'png'
+        out_dir = fig_dir or self.fig_folder
+        os.makedirs(out_dir, exist_ok=True)
+        created_fig.savefig(
+            f'{out_dir}/{self._dfc}_{self.genotype}_state_positions.{fmt}',
+            format=fmt, transparent=True)
+
+    return created_fig, ax
+
+
 def plot_plotting_context(self,ax=None,rec_min=0,rec_max=1):
     # Non rest trials
     T = self.df[self.df['is_rest']==False]
@@ -750,4 +861,27 @@ def plot_plotting_context(self,ax=None,rec_min=0,rec_max=1):
 
     return(ax)
 
+
+def plot_folded_outcomes(self, counts=None, norm=False, savefig=False, fig_dir=None,
+                         min_trial=100, max_trial_in_block=50, states=('hi', 'lo'),
+                         **plot_kwargs):
+    """Plot this fly's folded-block outcome curves.
+
+    If ``counts`` is None, computes them fresh from ``self.df`` (does not cache).
+    Pass a precomputed DataFrame (e.g. from ``T.folded_outcome_counts()`` or a
+    cross-fly aggregate) to reuse it.
+    """
+    if counts is None:
+        counts = block_folding.fold_outcome_counts(
+            self.df, min_trial=min_trial,
+            max_trial_in_block=max_trial_in_block, states=states,
+        )
+    fig = block_folding.plot_folded_outcomes(
+        counts, norm=norm, title=self._dfc, **plot_kwargs,
+    )
+    if savefig:
+        out_dir = fig_dir if fig_dir is not None else getattr(self, 'fig_folder', '.')
+        os.makedirs(out_dir, exist_ok=True)
+        fig.savefig(f'{out_dir}/{self._dfc}_folded_outcomes.svg')
+    return fig
 

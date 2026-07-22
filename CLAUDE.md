@@ -58,8 +58,8 @@ A persistent registry of Table objects across experiments (saved as pickle in `{
 
 ### Supporting modules
 - `mapd/sinq_builders.py` — `build_composite_sinq()`, `subset_sinq()` factory functions
-- `mapd/sentinels.py` — `MISSING` sentinel and `is_missing_like()` helper
-- `mapd/quickScanner.py` — `QuickScanner` for scanning raw `.mat` files directly
+- `mapd/paths.py` — filename conventions (`{protocol}_..._Table.parquet` / `_Raw_..._{trial}.mat`), `CellId`, `list_protocols`, `resolve_table_path`, `resolve_trial_path`, plus the data-root helpers (`default_data_directory`, `get_day_fly_cell`, `get_file`, `get_path`)
+- `mapd/trial_browser/` — PySide6 desktop browser for a Table's trials; CLI at `scripts/browse_trials.py`
 
 ## Trial Outcome Categories
 

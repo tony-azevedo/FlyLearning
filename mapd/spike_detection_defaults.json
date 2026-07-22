@@ -1,0 +1,13 @@
+{
+  "_description": "Project-level default spike-detection params for FlyLearning. Bootstrapped from 241203_F2_C1 trial 56. Overridden by trial-level /spikeDetectionParams and by ~/.spikedetect/<cell_id>.json. 'fs' and 'spike_template' are intentionally excluded.",
+  "_bootstrapped_from": "241203_F2_C1/trial_56",
+  "params": {
+    "hp_cutoff": 834.632725,
+    "lp_cutoff": 160.24238350000002,
+    "diff_order": 1,
+    "polarity": -1,
+    "peak_threshold": 0.0002043079188748296,
+    "distance_threshold": 16.0938177555946,
+    "amplitude_threshold": -0.047804084121288726
+  }
+}

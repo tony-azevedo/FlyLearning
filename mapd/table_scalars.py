@@ -13,6 +13,73 @@ from collections import Counter
 
 from functools import wraps
 
+from . import kinematics as kin
+
+
+_STATE_COUNTS_CACHE = '_state_time_counts_cache'
+
+
+def _accumulate_state_time_counts(self, bout_kwargs=None):
+    """Sum per-sample state counts (REST/DRIFT/MOVE) across every non-excluded
+    trial and return ``{'rest': n_rest, 'drift': n_drift, 'move': n_move}``.
+
+    Uses ``kin.detect_movement_bouts`` per trial with its default
+    ``start_time=0.0``, so samples before the aversive stimulus onset are
+    excluded — the denominator is post-stim time. Cached on the Table so
+    Sinq's per-fraction scalar calls don't re-run detection three times.
+    """
+    cache = getattr(self, _STATE_COUNTS_CACHE, None)
+    if cache is not None and bout_kwargs is None:
+        return cache
+
+    bout_kwargs = dict(bout_kwargs or {})
+    counts = {'rest': 0, 'drift': 0, 'move': 0}
+    for trial in self.df['Trial']:
+        if trial is None or getattr(trial, 'excluded', False):
+            continue
+        ds = trial.downsample_probe
+        t = np.asarray(trial.time)[ds].squeeze()
+        x = -(np.asarray(trial.probe_position).squeeze()[ds] - trial.probeZero)
+        if t.size < 4:
+            continue
+        _, states, _, _ = kin.detect_movement_bouts(t, x, **bout_kwargs)
+        # detect_movement_bouts's start_time filter only trims where bouts are
+        # searched; ``states`` still spans the full trace. Restrict to the same
+        # window (post-stim by default) so the denominator matches.
+        start_time = bout_kwargs.get('start_time', 0.0)
+        if start_time is not None:
+            i0 = int(np.searchsorted(t, start_time))
+            states = states[i0:]
+        counts['rest']  += int(np.count_nonzero(states == kin.STATE_REST))
+        counts['drift'] += int(np.count_nonzero(states == kin.STATE_DRIFT))
+        counts['move']  += int(np.count_nonzero(states == kin.STATE_MOVE))
+    if bout_kwargs == {} or bout_kwargs == {'start_time': 0.0}:
+        setattr(self, _STATE_COUNTS_CACHE, counts)
+    return counts
+
+
+def _state_time_fraction(self, state_name):
+    counts = _accumulate_state_time_counts(self)
+    total = counts['rest'] + counts['drift'] + counts['move']
+    if total == 0:
+        return np.nan
+    return counts[state_name] / total
+
+
+def compute_rest_time_fraction(self):
+    """Fraction of post-stim samples classified as REST across all non-excluded trials."""
+    return _state_time_fraction(self, 'rest')
+
+
+def compute_drift_time_fraction(self):
+    """Fraction of post-stim samples classified as DRIFT across all non-excluded trials."""
+    return _state_time_fraction(self, 'drift')
+
+
+def compute_move_time_fraction(self):
+    """Fraction of post-stim samples classified as MOVE across all non-excluded trials."""
+    return _state_time_fraction(self, 'move')
+
 
 def compute_duration(self):
     if not 'total_duration' in self.df.columns:

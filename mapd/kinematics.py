@@ -39,6 +39,23 @@ def velocity(t, x):
     return np.gradient(x, t)
 
 
+def smoothed_velocity(t, x, smooth_window=0.05):
+    """Signed velocity passed through a centred boxcar of width
+    ``smooth_window`` seconds. Default 50 ms matches the timescale used
+    internally by ``detect_movement_bouts`` for speed thresholding.
+    """
+    v = np.gradient(x, t)
+    dt = np.diff(t)
+    if dt.size == 0:
+        return v
+    fs = 1.0 / np.median(dt)
+    n = max(1, int(round(smooth_window * fs)))
+    if n <= 1:
+        return v
+    kernel = np.ones(n) / n
+    return np.convolve(v, kernel, mode='same')
+
+
 def acceleration(t, x):
     """Second derivative of position."""
     return np.gradient(velocity(t, x), t)
@@ -86,7 +103,7 @@ def positive_effort(t, x):
     return np.trapezoid(np.clip(pwr, a_min=0, a_max=None), t)
 
 
-def bout_cumulative_metrics(bouts, t, x, trials=None):
+def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
     """
     Cumulative v_rms and positive effort from the first bout start to the
     last bout end before the final prolonged rest within the trial-1 window.
@@ -98,11 +115,18 @@ def bout_cumulative_metrics(bouts, t, x, trials=None):
 
     When *trials* is ``None`` only the first bout is used.
 
+    Sub-threshold trials (``bouts`` empty) get a fallback window from
+    ``t=0`` to ``trials[0].as_duration + no_bout_post_as_s`` (capped at
+    trial-1 end). The returned dict carries ``no_bouts=True`` so callers
+    can distinguish these from quiet-but-detected trials.
+
     Parameters
     ----------
     bouts  : list of bout dicts (from detect_movement_bouts)
     t, x   : full trace arrays (from detect_movement_bouts)
     trials : list of Trial objects or None
+    no_bout_post_as_s : float — seconds past AS-off to include in the
+        fallback window when no bouts were detected.
 
     Returns
     -------
@@ -112,15 +136,54 @@ def bout_cumulative_metrics(bouts, t, x, trials=None):
         cum_effort  — cumulative positive effort at each sample
         v_rms       — scalar final v_rms
         effort      — scalar final effort
-    All arrays are empty (length-0) if no bouts were found.
+        no_bouts    — True if the fallback window was used
+    All arrays are empty (length-0) if neither bouts nor a usable fallback
+    window are available.
     """
     t = np.asarray(t)
     x = np.asarray(x)
 
     if not bouts:
+        # Sub-threshold trial. If we know the AS-off time, measure vigor
+        # from t=0 through (AS-off + no_bout_post_as_s), capped at the
+        # trial-1 boundary. Without trial context we can't pick a window,
+        # so return zeros.
         empty = np.array([])
-        return dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
-                    v_rms=0.0, effort=0.0)
+        zero = dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
+                    v_rms=0.0, effort=0.0, no_bouts=True)
+        if trials is None or not len(trials):
+            return zero
+        try:
+            as_off = float(trials[0].as_duration)
+        except Exception:
+            return zero
+        if as_off <= 0:
+            return zero
+        win_end = as_off + no_bout_post_as_s
+        if len(trials) >= 2:
+            t1_dur = trials[0].total_duration - trials[1].params['preDurInSec']
+            win_end = min(win_end, t1_dur)
+        si = int(np.searchsorted(t, 0.0))
+        ei = int(np.searchsorted(t, win_end))
+        ei = min(ei, len(t))
+        bt = t[si:ei]
+        bx = x[si:ei]
+        if len(bt) < 2:
+            return zero
+        bv = velocity(bt, bx)
+        cum_v_rms = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
+        bp_pwr = np.clip(k_spring_constant * bx * np.clip(bv, 0, None), 0, None)
+        bdt = np.diff(bt)
+        cum_effort = np.concatenate([[0.0],
+                         np.cumsum(0.5 * (bp_pwr[:-1] + bp_pwr[1:]) * bdt)])
+        return dict(
+            bt=bt,
+            cum_v_rms=cum_v_rms,
+            cum_effort=cum_effort,
+            v_rms=float(cum_v_rms[-1]),
+            effort=float(cum_effort[-1]),
+            no_bouts=True,
+        )
 
     si = bouts[0]['start_idx']
 
@@ -146,7 +209,7 @@ def bout_cumulative_metrics(bouts, t, x, trials=None):
     if len(bt) < 2:
         empty = np.array([])
         return dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
-                    v_rms=0.0, effort=0.0)
+                    v_rms=0.0, effort=0.0, no_bouts=False)
 
     bv = velocity(bt, bx)
     cum_v_rms = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
@@ -162,6 +225,7 @@ def bout_cumulative_metrics(bouts, t, x, trials=None):
         cum_effort=cum_effort,
         v_rms=float(cum_v_rms[-1]),
         effort=float(cum_effort[-1]),
+        no_bouts=False,
     )
 
 

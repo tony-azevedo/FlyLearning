@@ -14,8 +14,13 @@ Figure6/*
 Figure7/*
 FigureS1_norpA/*
 FigureS2_vnc_cut/*
+folded_blocks/*
+scripts/figpanels_browser/*
 
 screenshots/*
 Notes/*
 
-
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
