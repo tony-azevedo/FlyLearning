@@ -29,6 +29,22 @@ TRIAL_METADATA_GROUP = 'meta'
 # Module-private sentinel for "no default kwarg passed" (distinct from None).
 _MISSING = object()
 
+# ── Ephys quality, independent of ``excluded`` ────────────────────────────────
+# ``excluded`` means "throw this trial out entirely" and ``Table.exclude_trials``
+# drops those rows out of ``Table.df``. That is the wrong tool when the *probe*
+# recording is fine and only the electrode has gone: the trial still belongs in
+# every behavioural analysis and only the spiking analyses should skip it. So
+# ephys quality is a separate, additive annotation in /meta, and it is left to
+# ``Table.exclude_ephys_trials`` to act on it.
+#
+# /meta carries no MATLAB struct attributes (unlike /params, which is a real
+# struct with a MATLAB_fields list), so a new key here needs no attribute
+# bookkeeping — it is stored exactly like as_outcome or pyasState.
+EPHYS_STATUS_KEY = 'ephys_status'
+EPHYS_NOTE_KEY = 'ephys_note'
+EPHYS_STATUSES = ('good', 'redetect', 'bad')
+EPHYS_STATUS_DEFAULT = 'good'   # what an unannotated trial means
+
 from .kinematics import (
     k_spring_constant,
     velocity, acceleration, mean_velocity, rms_velocity, jerk_energy,
@@ -172,9 +188,23 @@ class Trial:
         self.day,self.fly,self.cell = get_day_fly_cell(fn)
         self._dfc = '{}_F{}_C{}'.format(self.day,self.fly,self.cell)
         self.fn = get_file(fn)
-        
+
         self.flycelldir = self.day + '_F' + str(self.fly) + '_C' + str(self.cell)
-        self.path = join(self.topdir,self.day,self.flycelldir)
+        # Honour the directory the caller actually gave, when they gave one and the
+        # file is really there; otherwise rebuild the canonical location under the
+        # data root (which is what a bare filename means).
+        #
+        # This matters for more than convenience: every write method on Trial
+        # resolves through ``self.path``, so before this, handing the constructor a
+        # path to a *copy* of a trial file silently read and wrote the original
+        # under the data root. There was no way to exercise the HDF5 writers
+        # against a sandbox, and a test meaning to touch a copy would modify real
+        # data instead.
+        given_dir = os.path.dirname(str(fn))
+        if given_dir and os.path.exists(join(given_dir, self.fn)):
+            self.path = given_dir
+        else:
+            self.path = join(self.topdir,self.day,self.flycelldir)
         self.file_path = join(self.path,self.fn)
         # print('Day {}, F{}, C{}: {}'.format(self.day,self.fly,self.cell,self.fn))
         
@@ -328,12 +358,22 @@ class Trial:
         if not self._probeZero is None:
             return self._probeZero
         
-        if 'probeZero' in self.params.keys():
-            self._probeZero = self.params['probeZero']
-            return self._probeZero
-        
-        elif 'probeZero' in self.meta_keys:
+        # /meta BEFORE /params, and the order matters.  /params is the
+        # acquisition record -- what the rig was configured with.  /meta is
+        # where the analysis writes a *correction*, e.g. a probeZero re-measured
+        # onto the probe's own physical stop.  Reading /params first meant a
+        # deliberate correction was silently shadowed by the value it was meant
+        # to replace: on 241115_F1_C1 and 241203_F2_C1, /meta held the measured
+        # 549.5 / 618.3 while /params still held the conventional 630, so every
+        # position was 80.5 / 11.7 px off and Table._bootstrap_meta_columns --
+        # which reads /meta -- disagreed with Trial.probeZero inside the same
+        # loaded Table.  Cells with only one of the two are unaffected.
+        if 'probeZero' in self.meta_keys:
             self._probeZero = self._read_value_from_meta('probeZero')
+            return self._probeZero
+
+        elif 'probeZero' in self.params.keys():
+            self._probeZero = self.params['probeZero']
             return self._probeZero
         
         else:
@@ -363,6 +403,57 @@ class Trial:
             self.write_string_if_changed('exclude_reason',reason)
             print('Excluded for {}: {}'.format(reason, self))
 
+
+    @property
+    def exclude_reason(self):
+        """Why this trial was excluded, or '' if no reason was recorded.
+
+        ``exclude(reason=...)`` writes this to /meta, but only when a reason is
+        passed, so most excluded trials have no such key. Prefer this over
+        ``tr.meta['exclude_reason']``: ``tr.meta`` is an opaque lazy-group proxy
+        with no ``__getitem__``, so subscripting it raises TypeError.
+        """
+        value = self._read_value_from_meta('exclude_reason', default=None)
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return ''
+        return str(value)
+
+    @property
+    def ephys_status(self):
+        """``'good'`` / ``'redetect'`` / ``'bad'`` — quality of the *ephys* trace.
+
+        Read straight from /meta each time rather than cached, because
+        ``__getattr__`` caches meta values as plain attributes and a status
+        written during the session would otherwise read stale. Trials with no
+        annotation return ``EPHYS_STATUS_DEFAULT``, so cells that have never been
+        reviewed behave exactly as before.
+
+        Set this through ``Table.set_ephys_status``, which validates the value and
+        writes the whole range in one pass; there is deliberately no setter here.
+        """
+        value = self._read_value_from_meta(EPHYS_STATUS_KEY, default=None)
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return EPHYS_STATUS_DEFAULT
+        value = str(value).strip()
+        return value if value else EPHYS_STATUS_DEFAULT
+
+    @property
+    def ephys_note(self):
+        """Free-text reason accompanying ``ephys_status`` ('' when unset)."""
+        value = self._read_value_from_meta(EPHYS_NOTE_KEY, default=None)
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return ''
+        return str(value)
+
+    @property
+    def ephys_ok(self):
+        """True when this trial's ephys is fit for spiking analysis.
+
+        ``redetect`` counts as not-ok: the trace is fine but the spike times on
+        the file are known to be wrong, so anything derived from them is wrong
+        too.
+        """
+        return self.ephys_status == 'good'
 
     def include(self):
         if self.excluded:
@@ -1101,7 +1192,8 @@ class Trial:
     def draw_in_browser(self, *, ax_probe, ax_ephys,
                         probe_line, ephys_lines: dict,
                         show_probe: bool = True,
-                        active_channels=()) -> None:
+                        active_channels=(),
+                        probe_zero=None) -> None:
         """Populate the browser's pre-built artists with this trial's data.
 
         The browser owns the Figure, Axes, and Line2D artists — this method
@@ -1119,13 +1211,19 @@ class Trial:
             Line artist per ephys channel in the browser's checkbox set.
         show_probe : bool
             If False the probe line is emptied (user unchecked the box).
+        probe_zero : float, optional
+            Override for ``self.probeZero``. The browser uses it to switch the
+            probe axis between the corrected ``/meta`` value and the acquisition
+            ``/params`` one without touching the file. ``None`` uses the
+            trial's own resolved value, which is what every other caller wants.
         active_channels : iterable[str]
             Channels currently checked. Inactive channels' lines are emptied.
         """
         t = self.time
         ds = self.downsample_probe
         if show_probe:
-            probe = -(self.probe_position[ds].squeeze() - self.probeZero)
+            pz = self.probeZero if probe_zero is None else probe_zero
+            probe = -(self.probe_position[ds].squeeze() - pz)
             probe_line.set_data(t[ds], probe)
         else:
             probe_line.set_data([], [])

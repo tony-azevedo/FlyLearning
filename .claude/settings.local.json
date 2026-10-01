@@ -79,7 +79,19 @@
       "Bash(jupyter nbconvert *)",
       "PowerShell(conda run -n flop_py312 python -c \"import mapd; from mapd import bout_analysis; import figure7_analysis; print\\('imports OK'\\)\")",
       "PowerShell(conda run -n flop_py312 python -c \"from mapd import kinematics as kin; import inspect; print\\(inspect.signature\\(kin.bout_cumulative_metrics\\)\\); r = kin.bout_cumulative_metrics\\([], [], [], trials=None\\); print\\('empty-no-trials:', {k: v for k, v in r.items\\(\\) if k != 'bt'}\\)\")",
-      "Bash(/c/Users/tony/miniconda3/envs/flop_py312/python.exe)"
+      "Bash(/c/Users/tony/miniconda3/envs/flop_py312/python.exe)",
+      "Bash(\"C:/Users/tony/miniconda3/envs/flop_py312/python.exe\" \"C:/Users/tony/AppData/Local/Temp/claude/C--Users-tony-Code-FlyLearning/6fa68605-266a-4870-b11f-25507321df0a/scratchpad/test_paired.py\")",
+      "Bash(\"C:/Users/tony/miniconda3/envs/flop_py312/python.exe\" -)",
+      "PowerShell(& C:\\\\Users\\\\tony\\\\miniconda3\\\\envs\\\\flop_py312\\\\python.exe -c \"import nbformat; nb=nbformat.read\\(r'C:\\\\Users\\\\tony\\\\Code\\\\FlyLearning\\\\op_cond_Figure5_mutant_explanations.ipynb', as_version=4\\); nbformat.validate\\(nb\\); print\\('valid,', len\\(nb.cells\\), 'cells'\\)\")",
+      "Bash(C:/Users/tony/miniconda3/envs/flop_py312/python.exe C:/Users/tony/AppData/Local/Temp/claude/C--Users-tony-Code-FlyLearning/e6c9caa4-8313-4000-8efd-6acd692bf9c2/scratchpad/probe_groups.py)",
+      "Bash(PYTHONIOENCODING=utf-8 sed *)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -rn \"voltage_1\\\\|blank\\\\|subthreshold\\\\|vm_\" --include=*.py mapd/ figure7_analysis.py)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -n \"^STATE_\\\\|^def \\\\|^V_TH\\\\|^V_REST\\\\|^DT_\\\\|^SMOOTH\" mapd/kinematics.py)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -n \"def get_file\\\\|def get_path\\\\|def get_day_fly_cell\\\\|def default_data_directory\" -A 22 mapd/paths.py)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -n \"METADATA_FIELDS\" -A 12 mapd/trial_browser/browser.py)",
+      "Bash(PYTHONIOENCODING=utf-8 grep -n \"vm_pad\\\\|if not rate_supported\" mapd/bout_analysis.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)",
+      "mcp__jupyter__ping"
     ],
     "defaultMode": "acceptEdits",
     "additionalDirectories": [

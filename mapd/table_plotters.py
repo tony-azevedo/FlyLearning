@@ -83,13 +83,13 @@ def pyas_state(df):
         return 'hi' if states=='hi' else 'lo'
 
 
-def plot_some_trials(self,index,from_zero=True,savefig=False,format=None):
+def plot_some_trials(self,index,from_zero=True,force_pos=False,savefig=False,format=None):
     fig = Figure(figsize=(8, 10), dpi=200)
     canvas = FigureCanvas(fig)
     axs = [fig.add_subplot(3, 1, i + 1) for i in range(3)]
 
     self.plot_some_as_piezo(index,ax=axs[0])
-    self.plot_some_probe_groups(index,ax=axs[1],from_zero=from_zero)
+    self.plot_some_probe_groups(index,ax=axs[1],from_zero=from_zero,force_pos=force_pos)
     self.plot_some_phys(index,ax=axs[2],from_zero=from_zero)
     if (savefig or format):
         fmt = format if format else "png"

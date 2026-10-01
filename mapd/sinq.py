@@ -666,6 +666,11 @@ class Sinq(NotesMixin):
         if dayflycell is None or self.df is None:
             raise KeyError('Sinq has no Tables or no dayflycell given')
                 
+        # Re-resolve Table at call time — see add_table for why.  Building an
+        # instance off the stale module-level class here makes every later
+        # isinstance(T, Table) fail against the reloaded class.
+        from .table import Table
+
         def make_table(row):
             if pd.isna(row['parquet']):
                 raise KeyError('parquet_path is empty')

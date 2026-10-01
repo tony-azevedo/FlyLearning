@@ -6,15 +6,18 @@ Figure2/*
 Figure2_folded/*
 
 Figure3/*
-Figure3_6_PCA_LDA/*
+Figure4_5_PCA_LDA/*
 
 Figure4/*
 Figure5/*
+Figure5_mutant_plots/*
+
 Figure6/*
 Figure7/*
 FigureS1_norpA/*
 FigureS2_vnc_cut/*
-folded_blocks/*
+Figures_opcond_R01/*
+data_cache/folded_blocks/*
 scripts/figpanels_browser/*
 
 screenshots/*

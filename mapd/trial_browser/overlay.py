@@ -61,8 +61,20 @@ class Overlay(ABC):
 
     name: str = ""  # subclasses override
 
+    #: Drawing parameters a subclass understands, with their defaults. The
+    #: browser pushes shared settings (e.g. the smoothing kernel) to every
+    #: overlay through ``set_params`` before each draw; keys an overlay does not
+    #: declare here are simply stored and ignored, so one control can address
+    #: several overlays without knowing which of them care.
+    DEFAULT_PARAMS: dict = {}
+
     def __init__(self):
         self._artists: list = []
+        self.params: dict = dict(self.DEFAULT_PARAMS)
+
+    def set_params(self, **params) -> None:
+        """Merge ``params`` into ``self.params``. Takes effect on the next draw."""
+        self.params.update(params)
 
     @abstractmethod
     def draw(self, trial: "Trial", axes: dict) -> None:
@@ -71,6 +83,37 @@ class Overlay(ABC):
         Implementations should append every created artist to
         ``self._artists`` so ``clear()`` can later remove them.
         """
+
+    def shade_kernel_edges(self, trial, axes, sigma_s, n_sigma=3.0):
+        """Shade where a kernel of sd ``sigma_s`` lacks full support.
+
+        There are no spikes before the recording starts, so any smoothed rate
+        necessarily climbs out of zero over the first few sigma and falls back at
+        the end — at sigma = 25 ms the first sample can read half the true rate.
+        The analysis pipeline trims these samples away; the browser shows the
+        whole trial, so here they get marked instead.
+
+        Only the first overlay to call this in a given draw actually shades, via a
+        flag left in the ``axes`` dict — the browser rebuilds that dict for every
+        draw, so the flag resets on its own and two overlays asking for shading
+        cannot double the alpha.
+        """
+        if axes.get("_kernel_edges_shaded") or not sigma_s:
+            return
+        axes["_kernel_edges_shaded"] = True
+        import numpy as np
+
+        t = np.asarray(trial.time).ravel()
+        if t.size < 2:
+            return
+        edge = float(n_sigma) * float(sigma_s)
+        for ax in (axes.get("probe"), axes.get("ephys")):
+            if ax is None:
+                continue
+            for a, b in ((t[0], t[0] + edge), (t[-1] - edge, t[-1])):
+                span = ax.axvspan(a, b, color="#d62728", alpha=0.07, lw=0,
+                                  zorder=0)
+                self._artists.append(span)
 
     def clear(self) -> None:
         """Remove all artists created by the last ``draw()`` call."""

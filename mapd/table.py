@@ -9,6 +9,8 @@ from . import table_scalars
 from . import block_folding
 from mapd.trial import Trial
 from mapd.trial import TRIAL_METADATA_GROUP
+from mapd.trial import (EPHYS_STATUS_KEY, EPHYS_NOTE_KEY, EPHYS_STATUSES,
+                        EPHYS_STATUS_DEFAULT)
 
 import importlib
 importlib.reload(table_plotters)
@@ -29,6 +31,116 @@ from functools import cached_property
 # from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from collections import Counter
 from scipy.io import loadmat
+
+# probeZero convention: zero sits this far beyond the lo-force target edge,
+# so probeZero == max(pyasXPosition) + PROBEZERO_CONV_OFFSET.  Cells re-zeroed
+# onto their measured resting stop depart from it; PROBEZERO_CONV_TOL is how
+# far they may drift before Table.__init__ says so.
+PROBEZERO_CONV_OFFSET = 180.0
+PROBEZERO_CONV_TOL = 20.0
+
+# Departure from the convention is 0.0 to the last decimal on every cell that
+# was never re-zeroed -- the convention is literally how their probeZero was
+# set -- so this threshold is not doing delicate work. Measured departures on
+# the re-zeroed cells are 11.7 / 29.5 / 80.5 px, well clear of it.
+PROBEZERO_CORRECTED_TOL = 2.0
+
+
+def probezero_provenance(trial, conv_offset=PROBEZERO_CONV_OFFSET,
+                         tol=PROBEZERO_CORRECTED_TOL, convention=None):
+    """Has this trial's ``probeZero`` been corrected?
+
+    THE RULE: ``probeZero`` in ``/meta`` means corrected. ``/params`` is the
+    acquisition record and is kept as-is, so a value in ``/meta`` is one the
+    analysis put there deliberately, and ``Trial.probeZero`` prefers it.
+
+    Everything else returned here is evidence for a tooltip, not part of the
+    decision. One field is worth reading before trusting a tick:
+    ``matches_convention``. ``Table._assume_probeZero_from_lo_target`` also
+    writes to ``/meta``, and what it writes is the SYNTHESISED convention
+    ``max(pyasXPosition) + 180`` rather than a measured resting stop. On the
+    cells to hand, the nine that were never re-zeroed sit at a departure of
+    exactly 0.0 from that convention while the three re-zeroed ones sit at
+    11.7 / 29.5 / 80.5 px -- so a tick whose ``matches_convention`` is True is
+    almost certainly the bootstrap's value rather than a measurement.
+
+    Returns a dict: ``corrected``, ``probe_zero``, ``params_value``,
+    ``meta_value``, ``convention``, ``departure``, ``matches_convention``, and
+    ``reason``.
+
+    The durable fix is an explicit key written at the moment of re-zeroing
+    (e.g. ``/meta/probeZero_source``); until then presence in ``/meta`` is what
+    the files can support.
+    """
+    out = {'corrected': False, 'probe_zero': np.nan, 'params_value': np.nan,
+           'meta_value': np.nan, 'convention': np.nan, 'departure': np.nan,
+           'matches_convention': None, 'missing': False,
+           'reason': 'no probeZero in /meta'}
+
+    def _num(v):
+        try:
+            return float(np.asarray(v).squeeze())
+        except (TypeError, ValueError):
+            return np.nan
+
+    try:
+        params = trial.params
+        if 'probeZero' in params.keys():
+            out['params_value'] = _num(params['probeZero'])
+    except (AttributeError, KeyError, TypeError):
+        pass
+    try:
+        in_meta = 'probeZero' in trial.meta_keys
+    except (AttributeError, KeyError, TypeError):
+        in_meta = False
+    if in_meta:
+        try:
+            out['meta_value'] = _num(trial._read_value_from_meta('probeZero'))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+    try:
+        out['probe_zero'] = _num(trial.probeZero)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+
+    out['corrected'] = bool(in_meta)
+
+    # The convention is ``max(pyasXPosition) + offset`` over the CELL, not this
+    # trial's own pyasXPosition -- which varies trial to trial as the target
+    # moves, so using it computed a different "convention" per trial and made
+    # the departure meaningless (210602_F1_C1 read +100 px off on one trial and
+    # 0.0 at cell level). Callers that hold the Table should pass ``convention``;
+    # without it the field is left NaN rather than guessed.
+    if convention is not None and np.isfinite(convention):
+        out['convention'] = float(convention)
+    if np.isfinite(out['convention']) and np.isfinite(out['probe_zero']):
+        out['departure'] = out['probe_zero'] - out['convention']
+        out['matches_convention'] = bool(abs(out['departure']) <= tol)
+
+    if not in_meta and np.isfinite(out['params_value']):
+        out['reason'] = (f"not corrected: probeZero comes from the acquisition "
+                         f"/params ({out['params_value']:.1f}) only")
+    elif not in_meta:
+        # Trial.probeZero returns 0 when neither source has it, and 0 is finite,
+        # so per_frame_records' NaN guard does not fire: x becomes
+        # -probe_position, several hundred px out, silently.
+        out['reason'] = ('NO probeZero anywhere -- Trial.probeZero falls back '
+                         'to 0, so x = -probe_position and every position for '
+                         'this trial is wrong by ~probeZero. Not a convention '
+                         'question; this trial is unusable as-is.')
+        out['missing'] = True
+    elif out['matches_convention']:
+        out['reason'] = (f"corrected: /meta = {out['meta_value']:.1f}, but it "
+                         f"equals the lo-target convention "
+                         f"({out['convention']:.1f}), so it may be the "
+                         f"synthesised value rather than a measured stop")
+    else:
+        d = ('' if not np.isfinite(out['departure'])
+             else f", {out['departure']:+.1f} px from the convention")
+        p = ('' if not np.isfinite(out['params_value'])
+             else f", acquisition /params kept at {out['params_value']:.1f}")
+        out['reason'] = f"corrected: /meta = {out['meta_value']:.1f}{d}{p}"
+    return out
 
 # from matplotlib import pyplot as plt
 # import matplotlib.patches as patches
@@ -59,6 +171,8 @@ _pyasState_cat =                     pd.api.types.CategoricalDtype(categories=['
 _vnc_status_cat =           pd.api.types.CategoricalDtype(categories=['intact','cut'], ordered=True)
 _filtercube_status_cat =    pd.api.types.CategoricalDtype(categories=['green','blue'], ordered=False)
 _fiberLED_cat =    pd.api.types.CategoricalDtype(categories=['epi_only','740_ir','625_red','590_orange','470_blue','405_uv'], ordered=True)
+# Ordered so that ``df.ephys_status >= 'redetect'`` reads as "needs attention".
+_ephys_status_cat = pd.api.types.CategoricalDtype(categories=EPHYS_STATUSES, ordered=True)
 
 _category_dict = {
     'as_outcome': _as_outcomes_cat,
@@ -66,6 +180,7 @@ _category_dict = {
     'vnc_status': _vnc_status_cat,
     'filtercube_status': _filtercube_status_cat,
     'fiberLED': _fiberLED_cat,
+    EPHYS_STATUS_KEY: _ephys_status_cat,
 }
 
 
@@ -162,6 +277,61 @@ class Table:
         self.df = self.df.copy()
         self.df['op_cnd_blocks'] = (self.df['pyasState'] != self.df['pyasState'].shift(1)).cumsum()
         self.df['pyasState'] = self.df['pyasState'].astype(_pyasState_cat)
+        self._check_probeZero_convention()
+
+
+    def _check_probeZero_convention(self, tol=None, verbose=True):
+        """Report probeZero values that sit far from the lo-target convention.
+
+        The convention (see ``_assume_probeZero_from_lo_target``) places zero
+        ``PROBEZERO_CONV_OFFSET`` um beyond the lo-force target edge, i.e.
+        ``probeZero == max(pyasXPosition) + 180``.  A cell re-zeroed onto its
+        own resting stop breaks that by design.
+
+        Nothing downstream notices, because the departure is invisible within a
+        cell: the trace is ``probeZero - probe_position`` and the target bounds
+        are ``probeZero - pyasXPosition``, so both shift together and the
+        position-relative-to-target geometry is unchanged.  What does change is
+        the meaning of an absolute position, which is what breaks when cells on
+        different conventions are put on shared axes.  Hence a load-time note.
+
+        Sets ``self.probeZero_offset`` to the signed departure in um (NaN when
+        probeZero or pyasXPosition is unavailable) and returns it.
+        """
+        tol = PROBEZERO_CONV_TOL if tol is None else tol
+        self.probeZero_offset = np.nan
+        if ('probeZero' not in self.df.columns
+                or 'pyasXPosition' not in self.df.columns):
+            return self.probeZero_offset
+
+        pz = pd.to_numeric(self.df['probeZero'], errors='coerce').dropna()
+        xpos = pd.to_numeric(self.df['pyasXPosition'], errors='coerce').dropna()
+        if pz.empty or xpos.empty:
+            return self.probeZero_offset
+
+        conventional = float(xpos.max()) + PROBEZERO_CONV_OFFSET
+        # Modal probeZero, not the mean: a handful of stray trials should not
+        # drag the reported offset away from the value the cell actually uses.
+        modal = float(pz.mode().iat[0])
+        self.probeZero_offset = modal - conventional
+
+        if verbose and abs(self.probeZero_offset) > tol:
+            n_distinct = int(pz.nunique())
+            msg = [
+                f'NOTE  {self._dfc}: probeZero={modal:g} is '
+                f'{self.probeZero_offset:+.1f} um from the convention '
+                f'({conventional:g} = max(pyasXPosition) '
+                f'{float(xpos.max()):g} + {PROBEZERO_CONV_OFFSET:g}).',
+                '      Positions within this cell stay self-consistent, but '
+                'absolute positions are not comparable with cells still on '
+                'the convention -- check before sharing an axis.',
+            ]
+            if n_distinct > 1:
+                msg.append(f'      {n_distinct} distinct probeZero values '
+                           f'across trials.')
+            for line in msg:
+                print(line)
+        return self.probeZero_offset
 
 
     def _assume_probeZero_from_lo_target(self):      
@@ -222,6 +392,184 @@ class Table:
             print(self._excluded_df['Trial'].to_list())
 
         self.df = self.df[self.df['excluded'] == False]
+
+
+    # -----------------------------------------------------------------
+    # Ephys quality — a second, additive exclusion axis
+    # -----------------------------------------------------------------
+    # A patch can fail while the force probe keeps recording perfectly. Those
+    # trials belong in every behavioural analysis and must be kept out of the
+    # spiking ones, so ``excluded`` / ``exclude_trials`` is the wrong mechanism:
+    # it would remove them from both. ``ephys_status`` in /meta records the
+    # judgement, ``set_ephys_status`` writes it, and ``exclude_ephys_trials``
+    # acts on it by moving those rows into ``_excluded_df`` — after which every
+    # analysis that iterates ``self.df['Trial']`` (collect_cell_records,
+    # measure_blank_window, the CCFs) skips them with no change of its own.
+
+    def set_ephys_status(self, status, trial_min=None, trial_max=None, index=None,
+                         note=None, write=False, verbose=True):
+        """Annotate a range of trials with an ``ephys_status`` (and optional note).
+
+        Parameters
+        ----------
+        status     : one of ``EPHYS_STATUSES`` — 'good' | 'redetect' | 'bad'.
+                     'redetect' means the trace is fine but the spike times on
+                     file are wrong; 'bad' means the ephys itself is unusable.
+        trial_min, trial_max, index
+                     which trials, same selection semantics as
+                     ``assign_column_value``. At least one is required, so a
+                     mistyped call cannot annotate the whole table.
+        note       : free text stored in ``ephys_note``, e.g. the reason.
+        write      : ``False`` (default) only updates ``self.df`` and reports what
+                     *would* be written. ``True`` writes to the trial HDF5 files.
+                     Defaults to a dry run because this touches hundreds of files
+                     on disk and is not undone by reloading the Table.
+
+        Returns the selected index, so a dry run can be inspected before writing.
+
+        Neither ``assign_column_value`` nor ``write_column_to_trial_files`` is used
+        here. The latter applies over every row of the table and its dispatch
+        treats ``float`` as a scalar to write — ``np.nan`` is a float, so every
+        *unannotated* trial would get a NaN written into its /meta, polluting
+        hundreds of files and breaking the categorical on reload. This writes only
+        the selected rows. (``assign_column_value`` is skipped because it prints
+        advice to call that writer.)
+        """
+        if status not in EPHYS_STATUSES:
+            raise ValueError(f'status must be one of {EPHYS_STATUSES}, got {status!r}')
+        if all(x is None for x in (trial_min, trial_max, index)):
+            raise ValueError('Must specify trial_min, trial_max, or index to '
+                             'select rows — refusing to annotate the whole table.')
+
+        sel = self._select_index(trial_min=trial_min, trial_max=trial_max, index=index)
+        if EPHYS_STATUS_KEY not in self.df.columns:
+            self.df[EPHYS_STATUS_KEY] = pd.Series(
+                [np.nan] * len(self.df), index=self.df.index, dtype=object)
+        self.df[EPHYS_STATUS_KEY] = self.df[EPHYS_STATUS_KEY].astype(object)
+        self.df.loc[sel, EPHYS_STATUS_KEY] = status
+        self.df[EPHYS_STATUS_KEY] = self.df[EPHYS_STATUS_KEY].astype(_ephys_status_cat)
+        if note is not None:
+            if EPHYS_NOTE_KEY not in self.df.columns:
+                self.df[EPHYS_NOTE_KEY] = np.nan
+            self.df.loc[sel, EPHYS_NOTE_KEY] = str(note)
+
+        if verbose:
+            print(f'{len(sel)} trials -> {EPHYS_STATUS_KEY}={status}'
+                  + (f' ({note})' if note else ''))
+            print(f'  trials {sel.min()}..{sel.max()}' if len(sel) else '  (none)')
+        if not write:
+            if verbose:
+                print('  DRY RUN — nothing written to disk. '
+                      'Re-run with write=True to persist.')
+            return sel
+
+        n_written = 0
+        for tn in sel:
+            trial = self.df.at[tn, 'Trial']
+            if trial is None:
+                continue
+            changed = trial.write_string_if_changed(EPHYS_STATUS_KEY, status)
+            if note is not None:
+                changed |= trial.write_string_if_changed(EPHYS_NOTE_KEY, str(note))
+            # __getattr__ caches meta values as plain attributes, so a value read
+            # earlier in the session would otherwise stay stale after this write.
+            for key in (EPHYS_STATUS_KEY, EPHYS_NOTE_KEY):
+                if key in trial.__dict__:
+                    del trial.__dict__[key]
+            n_written += int(bool(changed))
+        if verbose:
+            print(f'  wrote {n_written} of {len(sel)} trial files '
+                  f'({len(sel) - n_written} already had this value)')
+        return sel
+
+
+    def _select_index(self, trial_min=None, trial_max=None, index=None):
+        """The index selection ``assign_column_value`` applies, as an Index."""
+        if index is not None:
+            if isinstance(index, (list, np.ndarray, pd.Index)):
+                return self.df.index[self.df.index.isin(index)]
+            return self.df.index[self.df.index == index]
+        idx = self.df.index
+        if trial_min is not None:
+            idx = idx[idx >= trial_min]
+        if trial_max is not None:
+            idx = idx[idx <= trial_max]
+        return idx
+
+
+    def ephys_summary(self):
+        """Count of trials per ``ephys_status`` across ``df`` and ``_excluded_df``.
+
+        Unannotated trials are reported under ``EPHYS_STATUS_DEFAULT``, which is
+        what the analyses treat them as.
+        """
+        def _counts(df, label):
+            if df is None or not len(df) or EPHYS_STATUS_KEY not in df.columns:
+                n = 0 if df is None else len(df)
+                return {(label, EPHYS_STATUS_DEFAULT): n} if n else {}
+            s = df[EPHYS_STATUS_KEY].astype(object).fillna(EPHYS_STATUS_DEFAULT)
+            return {(label, k): int(v) for k, v in s.value_counts().items()}
+
+        out = {}
+        out.update(_counts(self.df, 'in_df'))
+        out.update(_counts(self._excluded_df, 'excluded'))
+        return pd.Series(out, dtype='int64').sort_index()
+
+
+    def exclude_ephys_trials(self, statuses=('bad',), verbose=True):
+        """Move trials whose ``ephys_status`` is in ``statuses`` out of ``df``.
+
+        The rows go to ``self._excluded_df`` — the same place ``exclude_trials``
+        puts them — so they remain inspectable (``T._excluded_df.loc[a:b]``) and
+        the plotters that point there keep working. Downstream spiking analyses
+        need no changes at all: they iterate ``self.df['Trial']``.
+
+        Deliberately leaves the ``excluded`` column and each trial's ``/excluded``
+        dataset alone. ``Trial.excluded`` keeps meaning "discard this trial
+        outright"; a bad patch is a different statement, and conflating them would
+        drop the trial from the behavioural analyses too.
+
+        Idempotent — calling it twice moves nothing the second time. Call it after
+        ``exclude_trials()`` and before ``collect_cell_records``.
+        """
+        statuses = tuple(np.atleast_1d(statuses).tolist())
+        for s in statuses:
+            if s not in EPHYS_STATUSES:
+                raise ValueError(f'unknown ephys status {s!r}, expected one of '
+                                 f'{EPHYS_STATUSES}')
+        if EPHYS_STATUS_KEY not in self.df.columns:
+            if verbose:
+                print(f'No {EPHYS_STATUS_KEY} column — nothing to exclude '
+                      f'(no trial in this table carries the key).')
+            return self.df.index[[]]
+
+        status = self.df[EPHYS_STATUS_KEY].astype(object).fillna(EPHYS_STATUS_DEFAULT)
+        hit = status.isin(statuses)
+        if not hit.any():
+            if verbose:
+                print(f'No trials with {EPHYS_STATUS_KEY} in {statuses}.')
+            return self.df.index[[]]
+
+        to_exclude = self.df[hit].copy()
+        to_exclude['exclusion_source'] = 'ephys'
+        moved = to_exclude.index
+        if self._excluded_df is None:
+            self._excluded_df = to_exclude
+        else:
+            if 'exclusion_source' not in self._excluded_df.columns:
+                # rows already there came from exclude_trials()
+                self._excluded_df = self._excluded_df.assign(exclusion_source='excluded')
+            self._excluded_df = pd.concat([self._excluded_df, to_exclude], axis=0)
+            self._excluded_df = self._excluded_df.sort_index()
+        self.df = self.df[~hit]
+
+        if verbose:
+            counts = status[hit].value_counts().to_dict()
+            print(f'Moved {len(moved)} trials to _excluded_df for ephys reasons '
+                  f'{counts}')
+            print(f'  trials {moved.min()}..{moved.max()}; '
+                  f'{len(self.df)} remain in df')
+        return moved
 
 
     def get_trials(self):

@@ -27,11 +27,13 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPushButton,
     QSplitter, QStatusBar, QVBoxLayout, QWidget,
 )
 
+from mapd.table import (PROBEZERO_CONV_OFFSET, PROBEZERO_CORRECTED_TOL,
+                        probezero_provenance)
 from . import overlays  # noqa: F401 — imports populate the overlay registry
 from .overlay import available_overlays
 
@@ -40,7 +42,16 @@ EPHYS_CHANNELS = ("voltage_1", "voltage_2", "current_1", "current_2",
                   "current_extEMG")
 DEFAULT_ACTIVE = ("voltage_1",)
 METADATA_FIELDS = ("trial", "as_outcome", "pyasState", "vnc_status",
-                   "excluded", "probeZero", "pyasXPosition", "pyasWidth")
+                   "excluded", "ephys_status", "ephys_note",
+                   "probeZero", "pyasXPosition", "pyasWidth")
+# Read-only here by design: ephys quality is set from the sinq notebook, which is
+# the record of how the data was processed. A click-to-edit control in the browser
+# would make annotations that leave no trace in that record.
+EPHYS_STATUS_COLORS = {"bad": "#c62828", "redetect": "#ef6c00"}
+# Gaussian sd choices offered by the kernel selector, shared by every overlay
+# that smooths (firing rate, subthreshold Vm).
+KERNEL_SIGMAS_S = (0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500)
+DEFAULT_KERNEL_S = 0.025
 EXPORT_FOLDER = "figpanels_browser"
 # Default text for each axis-limit edit at browser startup. Blank = autoscale.
 DEFAULT_LIMITS = {
@@ -110,6 +121,9 @@ class TrialBrowser(QMainWindow):
 
         self._current_trial_number = None
         self._probe_line = None
+        self._pz_convention = 'unset'
+        self._pz_prefer_meta = True   # sticky across trials
+        self._pz_effective = None     # value the axis is drawn against
         self._ephys_lines: dict = {}
         self._metadata_labels: dict = {}
         self._channel_boxes: dict = {}
@@ -258,10 +272,23 @@ class TrialBrowser(QMainWindow):
     def _build_channel_panel(self) -> QGroupBox:
         box = QGroupBox("Channels")
         layout = QVBoxLayout(box)
+        probe_row = QHBoxLayout()
         self._probe_box = QCheckBox("probe_position")
         self._probe_box.setChecked(True)
         self._probe_box.stateChanged.connect(self._on_channel_toggled)
-        layout.addWidget(self._probe_box)
+        probe_row.addWidget(self._probe_box)
+        # Which probeZero the probe axis is drawn against. Checked = the
+        # corrected /meta value; unchecked = the acquisition /params value (or
+        # the lo-target convention when there is no /params). It changes what
+        # the axis MEANS -- an uncorrected zero is synthesised, so absolute
+        # positions are not comparable across cells -- and nothing on the trace
+        # itself shows it. Amber when the value in use IS the convention.
+        self._pz_box = QCheckBox("probeZero")
+        self._pz_box.setEnabled(False)
+        self._pz_box.stateChanged.connect(self._on_probezero_toggled)
+        probe_row.addWidget(self._pz_box)
+        probe_row.addStretch(1)
+        layout.addLayout(probe_row)
         for ch in EPHYS_CHANNELS:
             cb = QCheckBox(ch)
             cb.setChecked(ch in DEFAULT_ACTIVE)
@@ -309,7 +336,39 @@ class TrialBrowser(QMainWindow):
             cb.stateChanged.connect(self._on_channel_toggled)
             self._overlay_boxes[name] = cb
             layout.addWidget(cb)
+
+        # One kernel for every overlay that smooths. Rate and Vm must share it:
+        # comparing them at different widths measures the wider kernel, not the
+        # cell.
+        row = QHBoxLayout()
+        lbl = QLabel("kernel:")
+        lbl.setFixedWidth(54)
+        self.kernel_combo = QComboBox()
+        for sigma in KERNEL_SIGMAS_S:
+            self.kernel_combo.addItem(f"{sigma * 1e3:g} ms", sigma)
+        self.kernel_combo.setCurrentIndex(KERNEL_SIGMAS_S.index(DEFAULT_KERNEL_S))
+        self.kernel_combo.setToolTip(
+            "Gaussian sd used by the Firing rate and Subthreshold Vm overlays.\n"
+            "Both use the same value so they can be compared directly.\n"
+            "Shaded bands mark where the kernel lacks full support (+/-3 sigma)."
+        )
+        self.kernel_combo.currentIndexChanged.connect(self._on_kernel_changed)
+        row.addWidget(lbl)
+        row.addWidget(self.kernel_combo)
+        row.addStretch(1)
+        layout.addLayout(row)
         return box
+
+    def _current_kernel_s(self) -> float:
+        combo = getattr(self, "kernel_combo", None)
+        if combo is None:
+            return DEFAULT_KERNEL_S
+        value = combo.currentData()
+        return DEFAULT_KERNEL_S if value is None else float(value)
+
+    def _on_kernel_changed(self, _index):
+        if self._current_trial_number is not None:
+            self.show_trial(self._current_trial_number)
 
     def _build_spike_panel(self) -> QGroupBox:
         box = QGroupBox("Spike detection")
@@ -399,6 +458,10 @@ class TrialBrowser(QMainWindow):
             self.statusBar().showMessage(f"Failed to load trial {trial_number}: {e}", 6000)
             return
 
+        # Resolve probeZero first: both the trace and the target band are
+        # drawn against it, and they must agree or the band lands off the trace.
+        self._update_probezero_box(trial)
+
         trial.draw_in_browser(
             ax_probe=self.ax_probe,
             ax_ephys=self.ax_ephys,
@@ -406,6 +469,7 @@ class TrialBrowser(QMainWindow):
             ephys_lines=self._ephys_lines,
             show_probe=self._probe_box.isChecked(),
             active_channels=self._active_channels(),
+            probe_zero=self._pz_effective,
         )
         self._draw_target_region(trial)
         self._apply_overlays(trial)
@@ -784,7 +848,9 @@ class TrialBrowser(QMainWindow):
         try:
             px = float(trial.pyasXPosition)
             pw = float(trial.pyasWidth)
-            pz = float(getattr(trial, "probeZero", 0) or 0)
+            # the same zero the trace was drawn against, never trial.probeZero
+            pz = self._pz_effective
+            pz = float(getattr(trial, "probeZero", 0) or 0) if pz is None else float(pz)
         except (AttributeError, TypeError, ValueError):
             return
 
@@ -799,13 +865,40 @@ class TrialBrowser(QMainWindow):
         span.sticky_edges.y[:] = []
         self._target_artists.append(span)
 
+    def _table_blank_window(self):
+        """The cell's spike blanking window, measured once per session.
+
+        Measured from an STA pooled over several trials and pushed to the Vm
+        overlay, because that overlay only ever sees one trial and a single-trial
+        STA measures a noticeably wider window than the truth — which would blank
+        (and interpolate) far more of the trace than necessary.
+        """
+        if getattr(self, "_blank_window", None) is None:
+            from .. import ephys as _ephys
+            try:
+                _, blank, _ = _ephys.blank_window_from_trials(self.table.df["Trial"])
+                self._blank_window = blank
+            except Exception:
+                self._blank_window = False   # measured and failed; don't retry
+        return self._blank_window or None
+
     def _apply_overlays(self, trial):
         axes = {"probe": self.ax_probe, "ephys": self.ax_ephys, "fig": self.fig}
+        sigma_s = self._current_kernel_s()
+        blank = None
+        vm_box = self._overlay_boxes.get("Subthreshold Vm")
+        if vm_box is not None and vm_box.isChecked():
+            blank = self._table_blank_window()
         for name, overlay in self._overlays.items():
             overlay.clear()
             cb = self._overlay_boxes.get(name)
             if cb is not None and cb.isChecked():
                 try:
+                    # Pushed to every overlay; those that don't smooth just store
+                    # it (see Overlay.set_params).
+                    overlay.set_params(sigma_s=sigma_s)
+                    if blank is not None and name == "Subthreshold Vm":
+                        overlay.set_params(blank=blank)
                     overlay.draw(trial, axes)
                 except Exception as e:
                     self.statusBar().showMessage(
@@ -968,16 +1061,132 @@ class TrialBrowser(QMainWindow):
             value: object
             if field == "trial":
                 value = trial_number
+            elif field in ("ephys_status", "ephys_note"):
+                # Ask the Trial, not the df: the property resolves an unannotated
+                # trial to its default ('good'), where the df column holds NaN and
+                # would display as "nan".
+                value = getattr(trial, field, "—")
             elif field in df.columns:
                 value = df.at[trial_number, field]
             else:
                 value = getattr(trial, field, "—")
-            self._metadata_labels[field].setText(_format_metadata_value(value))
+            lbl = self._metadata_labels[field]
+            lbl.setText(_format_metadata_value(value))
+            if field == "ephys_status":
+                color = EPHYS_STATUS_COLORS.get(str(value))
+                lbl.setStyleSheet(
+                    f"color: {color}; font-weight: bold;" if color else "")
 
         self.statusBar().showMessage(
             f"trial {trial_number}   "
             f"{self._current_index() + 1}/{len(self._trials)}"
         )
+
+    def _probezero_convention(self):
+        """``max(pyasXPosition) + offset`` over the whole cell, or None.
+
+        A cell-level quantity: pyasXPosition moves between trials as the target
+        moves, so a single trial's value is not the convention.
+        """
+        if getattr(self, '_pz_convention', 'unset') != 'unset':
+            return self._pz_convention
+        self._pz_convention = None
+        try:
+            col = self.table.df['pyasXPosition']
+            v = float(np.nanmax(col.to_numpy(dtype=float)))
+            if np.isfinite(v):
+                self._pz_convention = v + PROBEZERO_CONV_OFFSET
+        except (KeyError, AttributeError, TypeError, ValueError):
+            pass
+        return self._pz_convention
+
+    def _on_probezero_toggled(self, _state) -> None:
+        """User chose which probeZero to draw against; remember and redraw."""
+        self._pz_prefer_meta = self._pz_box.isChecked()
+        if self._current_trial_number is not None:
+            self.show_trial(self._current_trial_number)
+
+    def _update_probezero_box(self, trial) -> None:
+        """Set the probeZero checkbox for this trial and resolve the value.
+
+        Checked  -> the corrected ``/meta`` value.
+        Unchecked-> the acquisition ``/params`` value, or the lo-target
+                    convention when the trial carries no ``/params``.
+
+        The box is only enabled when ``/meta`` has something to switch to. The
+        user's choice is sticky across trials, so a cell can be stepped through
+        under one convention; it is forced off wherever ``/meta`` is absent.
+        """
+        try:
+            prov = probezero_provenance(
+                trial, convention=self._probezero_convention())
+        except Exception as exc:            # never let this break browsing
+            self._pz_box.setEnabled(False)
+            self._pz_box.setToolTip(f"probeZero check failed: {exc}")
+            self._pz_effective = None
+            return
+
+        meta_v = prov.get("meta_value", np.nan)
+        params_v = prov.get("params_value", np.nan)
+        conv = prov.get("convention", np.nan)
+        has_meta = bool(prov.get("corrected")) and np.isfinite(meta_v)
+
+        self._pz_box.blockSignals(True)
+        self._pz_box.setEnabled(has_meta)
+        self._pz_box.setChecked(has_meta and self._pz_prefer_meta)
+        self._pz_box.blockSignals(False)
+
+        # A trial can carry NO stored probeZero at all -- neither /meta nor
+        # /params. Falling back to the convention draws a sensible-looking
+        # trace, which is exactly the wrong thing for a diagnostic to do
+        # quietly: Trial.probeZero returns 0 for that trial, 0 is finite so
+        # per_frame_records' NaN guard never fires, and every OTHER analysis
+        # puts x at -probe_position, hundreds of px out. Draw it, but say so.
+        no_stored = not (np.isfinite(meta_v) or np.isfinite(params_v))
+        if self._pz_box.isChecked():
+            value, src = float(meta_v), "/meta"
+        elif np.isfinite(params_v):
+            value, src = float(params_v), "/params"
+        elif np.isfinite(conv):
+            value, src = float(conv), "lo-target convention"
+        else:
+            value, src = None, "missing"
+        self._pz_effective = value
+
+        tol = PROBEZERO_CORRECTED_TOL
+        is_conv = (value is not None and np.isfinite(conv)
+                   and abs(value - conv) <= tol)
+        if no_stored:
+            self._pz_box.setText(
+                "probeZero NOT STORED"
+                + (f" - drawn at {value:.1f}" if value is not None else ""))
+            self._pz_box.setStyleSheet("color: #d62728; font-weight: bold;")
+        elif value is None:
+            self._pz_box.setText("probeZero MISSING")
+            self._pz_box.setStyleSheet("color: #d62728; font-weight: bold;")
+        else:
+            self._pz_box.setText(f"probeZero {value:.1f} ({src})")
+            self._pz_box.setStyleSheet(
+                "color: #b8860b;" if is_conv               # synthesised
+                else ("color: #2ca02c;" if src == "/meta"  # corrected
+                      else "color: #d62728;"))             # acquisition value
+        tip = [prov.get("reason", "")]
+        for v, lab in ((meta_v, "/meta"), (params_v, "/params"),
+                       (conv, "lo-target convention")):
+            if v is not None and np.isfinite(v):
+                tip.append(f"{lab}: {v:.1f}")
+        if no_stored:
+            tip.append("RED: this trial stores no probeZero in /meta OR "
+                       "/params. The browser is drawing it at the convention, "
+                       "but Trial.probeZero returns 0, so every other analysis "
+                       "puts x at -probe_position. Fix the trial, do not trust "
+                       "this trace elsewhere.")
+        elif is_conv:
+            tip.append("AMBER: the value in use equals the convention, so it "
+                       "is synthesised from the target, not a measured stop.")
+        if not has_meta:
+            tip.append("Disabled: no /meta value to switch to.")
+        self._pz_box.setToolTip(("\n").join(t for t in tip if t))
 
 
 def _format_metadata_value(value) -> str:
