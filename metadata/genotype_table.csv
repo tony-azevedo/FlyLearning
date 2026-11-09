@@ -1,0 +1,38 @@
+category,condition,genotype,N,sex,figures,flies,flags
+standard,HC>Chrimson stim; MN GFP,+ ; HC-LexA / LexAop-Chrimson ; R81A06-GAL4 / pJFRC7,2,female,"1, 2, 3, 4, 5 (ref), SX (ref)",210331_F2_C1 210405_F1_C1,Chrimson variant not recorded
+standard,HC>Chrimson stim; MN GFP,+ ; HC-LexA / LexAop-Chrimson ; R35C09-GAL4 / pJFRC7,2,female,"1, 2, 3, 4, 5 (ref), SX (ref), 7 (A2)",210604_F1_C1 210903_F3_C1,Chrimson variant not recorded
+standard,HC>Chrimson stim; MN GFP,+ ; HC-LexA / LexAop-Chrimson ; R78E05-GAL4 / pJFRC7,1,female,"1, 2, 3, 4, 5 (ref), SX (ref), 7 (A2)",210915_F1_C1,notes header also says 31H05 on this day; confirm
+standard,HC>Chrimson stim; MN GFP,+ ; HC-LexA / LexAop-Chrimson ; R31H05-GAL4 / pJFRC7,1,female,"1, 2, 3, 4, 5 (ref), SX (ref), 7 (A4)",210917_F2_C1,Chrimson variant not recorded
+standard,HC-GAL4 test,HC-GAL4 > ? (effector not recorded),1,female,"1, 2, 3, 4, 5 (ref), SX (ref)",210302_F1_C2,"effector and chromosomes unknown (""Hot-Cell-Gal4 (test)"")"
+standard,light stim; MN GFP,+ ; SS61350-AD / pJFRC7 ; SS61350-DBD / +,14,female,"1, 2, 3, 4, 5 (ref), SX (ref)",250226_F2_C1 250227_F2_C1 250227_F3_C1 250228_F1_C1 250228_F2_C1 250304_F2_C1 250304_F3_C1 250923_F2_C1 250924_F1_C1 250924_F2_C1 250925_F1_C1 250925_F2_C1 260521_F1_C1 260521_F2_C1,SS61350 hemidriver names (AD/DBD enhancers) not found publicly; fill from Janelia record
+standard,light stim; MN GFP,+ ; pJFRC7 / + ; R31H05-GAL4 / +,2,female,"1, 2, 3, 4, 5 (ref), SX (ref)",250425_F1_C1 250923_F1_C1,
+standard,easy targets,+ ; pJFRC7 / + ; R81A06-GAL4 / +,1,female,"1, 2, 3, 4, 5 (ref), SX (ref)",251219_F1_C2,
+standard,norpA/cry het,norpA / + ; + ; cry / +,1,female,"1, 2, 3, 4, 5 (ref), SX (ref)",251105_F1_C1,alleles not recorded; notes say heterozygous
+frustrated,VNC cut (ppk stim),+ ; ppk-GAL4 / + ; 10XUAS-Chrimson / +,5,female,"4, SY",241029_F2_C1 241029_F3_C1 241101_F1_C1 241101_F2_C1 241105_F1_C1,"""10XUAS-ChR"": Chrimson assumed from ""red light ppk stim""; 241105_F1 is the sham"
+frustrated,VNC cut (HC stim),+ ; HC-GAL4 / + ; 10XUAS-Chrimson / +,2,female,"4, SY",241105_F2_C1 241105_F3_C1,241105_F2 notes header says ppk in one line; F3 notes say F2 is Hot-Cell
+frustrated,"norpA, antenna",w[*] norpA ; + ; +,2,female,"4, SX",250813_F1_C1 250813_F3_C1,norpA allele not recorded
+frustrated,"norpA, no antenna",w[*] norpA ; + ; +,1,female,"3, 4, SX",251218_F2_C1,norpA allele not recorded
+frustrated,"norpA, antenna",norpA[E55] ; + ; +  (w+),2,female,"4, SX",251210_F1_C1 251210_F2_C1,
+frustrated,"norpA, no antenna",norpA[E55] ; + ; +  (w+),3,female,"3, 4, SX",251216_F1_C1 251216_F2_C1 251216_F3_C1,
+frustrated,"norpA, antenna cut in stages",norpA[E55] ; + ; +  (w+),2,female,"3, 4, SX",260603_F2_C1 260603_F3_C1,
+frustrated,1 s fixed stim,+ ; pJFRC7 ; +,4,female,"2, 3, 4",251103_F1_C1 251103_F2_C1 251107_F1_C1 251107_F2_C1,no driver; zygosity of pJFRC7 not recorded
+frustrated,1 s fixed stim (empty split-GAL4),w[1118] / + ; p65.AD.Uw(attP40) / pJFRC7 ; GAL4.DBD.Uw(attP2) / +,2,female,"2, 3, 4",261019_F1_C1 261019_F2_C1,empty split-GAL4 stock: w[1118] ; P{y[+t7.7] w[+mC]=p65.AD.Uw}attP40 ; P{y[+t7.7] w[+mC]=GAL4.DBD.Uw}attP2 (per Tony 2026-10-28)
+frustrated,replay,+ ; pJFRC7 ; +,4,female,"2, 3, 4, SX",251126_F1_C1 251203_F1_C1 251203_F2_C1 251205_F1_C1,no driver
+frustrated,"WT, no antenna",+ ; pJFRC7 ; +,3,female,"4, SX",251217_F1_C1 251218_F1_C1 251218_F3_C1,no driver
+frustrated,replay,+ ; pJFRC7 / + ; R35C09-GAL4 / +,2,female,"2, 3, 4, SX",251113_F1_C1 251113_F2_C1,
+frustrated,replay,+ ; SS61350-AD / pJFRC7 ; SS61350-DBD / +,1,female,"2, 3, 4, SX",251205_F2_C1,
+frustrated,no cue,+ ; SS61350-AD / pJFRC7 ; SS61350-DBD / +,1,female,4,251124_F1_C1,
+frustrated,extension,+ ; SS61350-AD / pJFRC7 ; SS61350-DBD / +,2,female,"2, 3, 4",260619_F1_C1 260619_F2_C1,
+frustrated,extension,+ ; pJFRC7 / + ; R81A06-GAL4 / +,3,female,"3, 4",260623_F1_C1 260623_F2_C1 260623_F3_C1,260623_F1 main notes header says ss61350>pJFRC7; control header says 81A06
+genetic (standard task),"iav silenced, w-",w ; + ; iav-GAL4 / UAS-Kir2.1,6,female,"3, 5",241205_F2_C1 241205_F3_C1 241219_F1_C1 241219_F2_C1 241220_F1_C1 241220_F2_C1,"UAS-Kir2.1 chromosome: notes say 3rd (iav-Gal4>+;+;UAS-Kir2.1), but the TH cross lists it on 2nd"
+genetic (standard task),iav silenced,+ ; + ; iav-GAL4 / UAS-Kir2.1,10,female,"3, 5",250317_F1_C1 250317_F2_C1 250318_F1_C1 250318_F2_C1 250318_F3_C1 250320_F1_C1 250320_F2_C1 250325_F1_C1 250423_F1_C1 250423_F2_C1,"same Kir2.1 question; iav-GAL4 = BDSC 52273, chr 3"
+genetic (standard task),iav silenced (TeTx),+ ; UAS-TeTx / + ; iav-GAL4 / +,1,female,"3, 5",251217_F2_C1,UAS-TeTx chromosome assumed from the 58E02 cross
+genetic (standard task),"w- background, light stim",w ; pJFRC7 / + ; R31H05-GAL4 / +,7,female,"3, 5",250127_F1_C1 250127_F2_C1 250128_F1_C1 250204_F1_C1 250204_F2_C1 250211_F2_C1 250211_F3_C1,
+genetic (standard task),DANs silenced (TH),+ ; UAS-Kir2.1 / + ; TH-GAL4 / +,6,female,"3, 5",250506_F1_C1 250506_F2_C1 250507_F1_C1 250507_F2_C1 250509_F2_C1 250514_F1_C1,
+genetic (standard task),TH control,+ ; pJFRC7 / + ; TH-GAL4 / +,1,female,5 (LDA projection only),250515_F1_C1,notes header also says iav-Gal4/pJFRC7; confirm
+genetic (standard task),PAM silenced,+ ; UAS-TeTx / + ; R58E02-GAL4 / +,4,female,"3, 5",251114_F1_C2 260605_F1_C1 260605_F2_C1 260605_F3_C1,
+genetic (standard task),PPL1 silenced,+ ; MB504B-AD / UAS-TeTx ; MB504B-DBD / +,2,female,"3, 5",260527_F1_C1 260527_F4_C1,driver MB504B per gm_geno_map in op_cond_Figure4_Fig5_pca_lda.ipynb; notes say only PPL1>Tetx
+MN recording only,MN patch,+ ; HC-LexA / LexAop-Chrimson ; R35C09-GAL4 / pJFRC7,2,female,7 (A2),210602_F1_C1 210908_F3_C1,
+MN recording only,MN patch,w ; pJFRC7 / + ; R31H05-GAL4 / +,1,female,7 (A2),240430_F1_C1,
+MN recording only,MN patch,w ; pJFRC7 / + ; R31H05-GAL4 / +,2,female,7 (A4),241115_F1_C1 241203_F2_C1,241203_F2 notes purpose mentions 81A06
+MN recording only,MN patch (unusable),+ ; HC-LexA / LexAop-Chrimson ; R81A06-GAL4 / pJFRC7,1,female,none,210319_F2_C1,cell unusable (amplifier mode); not in any figure

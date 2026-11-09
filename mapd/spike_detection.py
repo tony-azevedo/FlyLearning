@@ -90,10 +90,78 @@ def trial_to_recording(trial, channel: str = "voltage_1"):
     return sd.Recording(name=name, voltage=v, sample_rate=fs)
 
 
-def load_spikes_from_trial(trial):
-    """Read spike results from trial.file_path, or None if not present."""
+# ---------------------------------------------------------------------------
+# Result fields: intracellular spikes vs EMG / extracellular spikes
+# ---------------------------------------------------------------------------
+# A trial can carry two independent results, named as the MATLAB
+# spikeDetection.m names them with its 'alt_spike_field' argument:
+#
+#   field        uncorrected              params group              spot-check flag
+#   spikes       spikes_uncorrected       spikeDetectionParams      spikeSpotChecked
+#   EMGspikes    EMGspikes_uncorrected    EMGspikeDetectionParams   EMGspikeSpotChecked
+#
+# so EMG detection never overwrites the intracellular result, and files stay
+# readable by FlyAnalysis. The params group also records ``channel``, the
+# electrode the result was detected on (current_extEMG, current_1, ...).
+
+def field_keys(field: str = "spikes") -> dict:
+    """HDF5 dataset / group names that hold one spike result ``field``."""
+    if not field.endswith("s"):
+        raise ValueError(f"spike field must end in 's' (e.g. 'EMGspikes'): {field!r}")
+    stem = field[:-1]
+    return {"spikes": field, "uncorrected": f"{field}_uncorrected",
+            "params": f"{stem}DetectionParams", "spot": f"{stem}SpotChecked"}
+
+
+def default_field(channel: str) -> str:
+    """``spikes`` for an intracellular voltage channel, ``EMGspikes`` for any
+    current / extracellular channel."""
+    return "spikes" if channel.startswith("voltage") else "EMGspikes"
+
+
+def load_spikes_from_trial(trial, field: str = "spikes"):
+    """Read the ``field`` spike result from trial.file_path, or None if absent.
+
+    Reads the HDF5 directly rather than through ``sd.load_recording``, which
+    insists on a ``voltage_1`` dataset and only knows the ``spikes`` field.
+    MATLAB's empty-array encoding (a ``[0, 0]`` payload flagged MATLAB_empty)
+    reads as zero spikes. Pre-v7.3 (non-HDF5) files fall back to
+    ``sd.load_recording`` for ``spikes``.
+    """
     sd = _import_spikedetect()
-    return sd.load_recording(trial.file_path).result
+    from spikedetect.io.mat import _load_params_h5, _read_h5_array_or_empty
+
+    k = field_keys(field)
+    try:
+        f = h5py.File(trial.file_path, "r")
+    except OSError:
+        return sd.load_recording(trial.file_path).result if field == "spikes" else None
+    with f:
+        if k["params"] not in f:
+            return None
+        params = _load_params_h5(f[k["params"]])
+        st = (_read_h5_array_or_empty(f[k["spikes"]], dtype=np.int64)
+              if k["spikes"] in f else np.array([], dtype=np.int64))
+        stu = (_read_h5_array_or_empty(f[k["uncorrected"]], dtype=np.int64)
+               if k["uncorrected"] in f else np.array([], dtype=np.int64))
+        spot = bool(np.asarray(f[k["spot"]]).ravel()[0]) if k["spot"] in f else False
+    return sd.SpikeDetectionResult(spike_times=st, spike_times_uncorrected=stu,
+                                   params=params, spot_checked=spot)
+
+
+def result_channel(trial, field: str = "spikes") -> Optional[str]:
+    """The channel a stored result was detected on, or None if not recorded
+    (results written before the channel was stored, and MATLAB results)."""
+    _import_spikedetect()
+    from spikedetect.io.mat import _read_h5_string
+
+    k = field_keys(field)
+    try:
+        with h5py.File(trial.file_path, "r") as f:
+            ds = f.get(f"{k['params']}/channel")
+            return None if ds is None else _read_h5_string(ds)
+    except OSError:
+        return None
 
 
 def print_trial_params(trial) -> None:
@@ -199,7 +267,7 @@ def plot_trial_spikes(trial, result=None, channel: str = "voltage_1",
     from spikedetect import SignalFilter
 
     if result is None:
-        result = load_spikes_from_trial(trial)
+        result = load_spikes_from_trial(trial, field=default_field(channel))
 
     rec = trial_to_recording(trial, channel=channel)
     t = np.arange(rec.n_samples) / rec.sample_rate
@@ -330,17 +398,20 @@ def _cell_dir(cell_id: str) -> Path:
     return Path(default_data_directory(verbose=False)) / day / cell_id
 
 
-def _cell_params_path(cell_id: str) -> Path:
+def _cell_params_path(cell_id: str, field: str = "spikes") -> Path:
     """Sidecar JSON for per-cell params.
 
     Mirrors the ``Acquisition_<cell>.mat`` naming convention and lives
     alongside the trial .mat files in the cell's data directory. Travels
-    with the data rather than living in the user's home.
+    with the data rather than living in the user's home. A field other than
+    ``spikes`` gets its own file, ``spike_detection_<cell>_<field>.json``.
     """
-    return _cell_dir(cell_id) / f"spike_detection_{cell_id}.json"
+    sfx = "" if field == "spikes" else f"_{field}"
+    return _cell_dir(cell_id) / f"spike_detection_{cell_id}{sfx}.json"
 
 
-def save_cell_params(cell_id: str, params) -> Path:
+def save_cell_params(cell_id: str, params, field: str = "spikes",
+                     channel: Optional[str] = None) -> Path:
     """Persist per-cell SpikeDetectionParams into the cell's data directory.
 
     Written as ``spike_detection_<cell_id>.json`` via ``params.to_dict()``
@@ -348,29 +419,59 @@ def save_cell_params(cell_id: str, params) -> Path:
     folder so it travels with the recording and any collaborator reading
     the directory sees the tuning.
     """
-    path = _cell_params_path(cell_id)
+    path = _cell_params_path(cell_id, field)
     if not path.parent.is_dir():
         raise FileNotFoundError(
             f"Cell directory does not exist: {path.parent}. "
             "save_cell_params is meant to be called on a real cell that has "
             "already been recorded."
         )
-    path.write_text(json.dumps(params.to_dict(), indent=2))
+    d = params.to_dict()
+    if channel is not None:
+        d["channel"] = channel
+    path.write_text(json.dumps(d, indent=2))
     return path
 
 
-def load_cell_params(cell_id: str):
+def load_cell_params(cell_id: str, field: str = "spikes"):
     """Load per-cell SpikeDetectionParams or return None if not saved."""
     sd = _import_spikedetect()
-    path = _cell_params_path(cell_id)
+    path = _cell_params_path(cell_id, field)
     if not path.exists():
         return None
     d = json.loads(path.read_text())
+    d.pop("channel", None)
     return sd.SpikeDetectionParams.from_dict(d)
 
 
+def cell_params_channel(cell_id: str, field: str = "spikes") -> Optional[str]:
+    """The channel last tuned for ``field`` on this cell, from its JSON."""
+    path = _cell_params_path(cell_id, field)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get("channel")
+
+
+def _robust_peak_threshold(trial, channel: str, p, k: float = 5.0) -> float:
+    """``k`` robust SDs (MAD) of ``channel`` after ``p``'s filter.
+
+    ``peak_threshold`` is an absolute offset in filtered units, so a value
+    tuned on Vm in mV means nothing on an EMG channel whose raw scale is
+    ~100x smaller; this gives an EMG channel a starting point on its own scale.
+    """
+    from spikedetect import SignalFilter
+    v = np.asarray(getattr(trial, channel), dtype=np.float64).ravel()
+    filt = SignalFilter.filter_data(v, fs=p.fs, hp_cutoff=p.hp_cutoff,
+                                    lp_cutoff=p.lp_cutoff,
+                                    diff_order=p.diff_order, polarity=p.polarity)
+    filt = filt[max(100, round(0.01 * p.fs)):]
+    mad = float(np.median(np.abs(filt - np.median(filt))))
+    return k * 1.4826 * mad
+
+
 def initial_params(trial, fs: Optional[float] = None,
-                   cell_id: Optional[str] = None):
+                   cell_id: Optional[str] = None, field: str = "spikes",
+                   channel: Optional[str] = None):
     """Build a starting ``SpikeDetectionParams`` with sensible precedence.
 
     Precedence, highest first:
@@ -384,14 +485,18 @@ def initial_params(trial, fs: Optional[float] = None,
 
     ``fs`` is always stamped from the recording (or from the ``fs`` kwarg
     if passed) so you never inherit a stale sample rate.
+
+    ``field`` picks which stored result and which per-cell JSON steps 1-2
+    read. For a field other than ``spikes`` (EMG), step 3's peak threshold
+    -- tuned on Vm -- is replaced by 5 robust SDs of ``channel`` filtered.
     """
     sd = _import_spikedetect()
 
     if fs is None:
         fs = float(trial.params["sampratein"])
 
-    # 1) trial's own /spikeDetectionParams
-    res = load_spikes_from_trial(trial)
+    # 1) trial's own params group for this field
+    res = load_spikes_from_trial(trial, field=field)
     if res is not None:
         p = copy.copy(res.params)
         p.fs = float(fs)
@@ -399,7 +504,7 @@ def initial_params(trial, fs: Optional[float] = None,
 
     # 2) per-cell JSON
     if cell_id is not None:
-        p = load_cell_params(cell_id)
+        p = load_cell_params(cell_id, field=field)
         if p is not None:
             p.fs = float(fs)
             return p
@@ -410,22 +515,34 @@ def initial_params(trial, fs: Optional[float] = None,
     for k, v in default.items():
         if hasattr(p, k):
             setattr(p, k, v)
+    if field != "spikes" and channel is not None:
+        p.peak_threshold = _robust_peak_threshold(trial, channel, p)
     return p
 
 
-def _write_params_group(fp: str, p) -> None:
-    """Delete and rewrite /spikeDetectionParams/ in the trial .mat file.
+def _write_params_group(fp: str, p, field: str = "spikes",
+                        channel: Optional[str] = None) -> None:
+    """Delete and rewrite ``field``'s params group in the trial .mat file
+    (/spikeDetectionParams/ for ``spikes``, /EMGspikeDetectionParams/ for
+    ``EMGspikes``). ``channel`` is stored in the group when given.
 
-    Does not touch /spikes, /spikes_uncorrected, or /spikeSpotChecked.
+    Does not touch the spike datasets themselves.
     """
+    grp = field_keys(field)["params"]
     with h5py.File(fp, "r+") as f:
-        if "spikeDetectionParams" in f:
-            del f["spikeDetectionParams"]
+        if grp in f:
+            if channel is None and "channel" in f[grp]:
+                from spikedetect.io.mat import _read_h5_string
+                channel = _read_h5_string(f[grp]["channel"])
+            del f[grp]
 
+    if channel is not None:
+        h5s.write(data=str(channel), path=f"/{grp}/channel", filename=fp,
+                  matlab_compatible=True, store_python_metadata=False)
     for py_name, mat_name in _PARAM_SCALAR_FIELDS:
         h5s.write(
             data=float(getattr(p, py_name)),
-            path=f"/spikeDetectionParams/{mat_name}",
+            path=f"/{grp}/{mat_name}",
             filename=fp,
             matlab_compatible=True,
             store_python_metadata=False,
@@ -433,7 +550,7 @@ def _write_params_group(fp: str, p) -> None:
     if p.spike_template is not None:
         h5s.write(
             data=np.asarray(p.spike_template, dtype=np.float64).reshape(-1, 1),
-            path="/spikeDetectionParams/spikeTemplate",
+            path=f"/{grp}/spikeTemplate",
             filename=fp,
             matlab_compatible=True,
             store_python_metadata=False,
@@ -441,7 +558,7 @@ def _write_params_group(fp: str, p) -> None:
     if p.likely_inflection_point_peak is not None:
         h5s.write(
             data=float(p.likely_inflection_point_peak),
-            path="/spikeDetectionParams/likelyiflpntpeak",
+            path=f"/{grp}/likelyiflpntpeak",
             filename=fp,
             matlab_compatible=True,
             store_python_metadata=False,
@@ -452,7 +569,7 @@ def _write_params_group(fp: str, p) -> None:
     if getattr(p, "template_updated_at", None) is not None:
         h5s.write(
             data=p.template_updated_at.isoformat(),
-            path="/spikeDetectionParams/templateUpdatedAt",
+            path=f"/{grp}/templateUpdatedAt",
             filename=fp,
             matlab_compatible=True,
             store_python_metadata=False,
@@ -460,39 +577,49 @@ def _write_params_group(fp: str, p) -> None:
     if getattr(p, "min_isi_samples", None) is not None:
         h5s.write(
             data=float(p.min_isi_samples),
-            path="/spikeDetectionParams/min_isi_samples",
+            path=f"/{grp}/min_isi_samples",
             filename=fp,
             matlab_compatible=True,
             store_python_metadata=False,
         )
 
 
-def save_params_to_trial(trial, params, invalidate_spikes: bool = True) -> None:
-    """Persist only /spikeDetectionParams/ into the trial .mat file.
+def _delete_spike_datasets(fp: str, field: str) -> None:
+    k = field_keys(field)
+    with h5py.File(fp, "r+") as f:
+        for key in (k["spikes"], k["uncorrected"], k["spot"]):
+            if key in f:
+                del f[key]
+
+
+def save_params_to_trial(trial, params, invalidate_spikes: bool = True,
+                         field: str = "spikes",
+                         channel: Optional[str] = None) -> None:
+    """Persist only ``field``'s params group into the trial .mat file.
 
     Use during tuning, when you have good params but haven't run full
     detection yet.
 
-    By default (``invalidate_spikes=True``), any pre-existing /spikes,
-    /spikes_uncorrected, and /spikeSpotChecked are also deleted — the
+    By default (``invalidate_spikes=True``), that field's pre-existing
+    spikes, uncorrected spikes and spot-check flag are also deleted — the
     rationale being that if params have changed, the old spikes are
     stale. Pass ``invalidate_spikes=False`` to preserve them (e.g. when
     the params you're writing match the ones the existing spikes were
-    detected with).
+    detected with). Other fields are never touched.
     """
     fp = trial.file_path
     if invalidate_spikes:
-        with h5py.File(fp, "r+") as f:
-            for key in ("spikes", "spikes_uncorrected", "spikeSpotChecked"):
-                if key in f:
-                    del f[key]
-    _write_params_group(fp, params)
+        _delete_spike_datasets(fp, field)
+    _write_params_group(fp, params, field=field, channel=channel)
 
 
-def save_spikes_to_trial(trial, result, spot_checked: Optional[bool] = None) -> None:
+def save_spikes_to_trial(trial, result, spot_checked: Optional[bool] = None,
+                         field: str = "spikes",
+                         channel: Optional[str] = None) -> None:
     """Write a SpikeDetectionResult into trial.file_path in place.
 
-    Writes MATLAB-compatible datasets at the top level of the trial's HDF5:
+    Writes MATLAB-compatible datasets at the top level of the trial's HDF5,
+    named after ``field`` (see :func:`field_keys`); for ``spikes``:
 
         /spikes                 (Nx1 double, 0-based sample indices)
         /spikes_uncorrected     (Nx1 double)
@@ -500,17 +627,18 @@ def save_spikes_to_trial(trial, result, spot_checked: Optional[bool] = None) -> 
         /spikeDetectionParams/  (group: fs, hp_cutoff, lp_cutoff, diff,
                                  peak_threshold, Distance_threshold,
                                  Amplitude_threshold, polarity,
-                                 spikeTemplateWidth, spikeTemplate, ...)
+                                 spikeTemplateWidth, spikeTemplate,
+                                 channel, ...)
 
-    `spikedetect.load_recording(trial.file_path).result` reads these back.
+    and EMGspikes / EMGspikes_uncorrected / EMGspikeSpotChecked /
+    EMGspikeDetectionParams for ``EMGspikes``. :func:`load_spikes_from_trial`
+    reads them back. ``channel=None`` keeps the channel already recorded.
     """
     fp = trial.file_path
+    k = field_keys(field)
 
     # Drop any prior spike data so we don't mix old and new
-    with h5py.File(fp, "r+") as f:
-        for key in ("spikes", "spikes_uncorrected", "spikeSpotChecked"):
-            if key in f:
-                del f[key]
+    _delete_spike_datasets(fp, field)
 
     spikes = np.asarray(result.spike_times, dtype=np.float64).reshape(-1, 1)
     spikes_u = np.asarray(
@@ -518,14 +646,14 @@ def save_spikes_to_trial(trial, result, spot_checked: Optional[bool] = None) -> 
     ).reshape(-1, 1)
     sc = bool(result.spot_checked if spot_checked is None else spot_checked)
 
-    h5s.write(data=spikes, path="/spikes", filename=fp,
+    h5s.write(data=spikes, path=f"/{k['spikes']}", filename=fp,
               matlab_compatible=True, store_python_metadata=False)
-    h5s.write(data=spikes_u, path="/spikes_uncorrected", filename=fp,
+    h5s.write(data=spikes_u, path=f"/{k['uncorrected']}", filename=fp,
               matlab_compatible=True, store_python_metadata=False)
-    h5s.write(data=float(sc), path="/spikeSpotChecked", filename=fp,
+    h5s.write(data=float(sc), path=f"/{k['spot']}", filename=fp,
               matlab_compatible=True, store_python_metadata=False)
 
-    _write_params_group(fp, result.params)
+    _write_params_group(fp, result.params, field=field, channel=channel)
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +667,8 @@ def _params_with_fs(params, fs: float):
 
 
 def tune_params_on_trials(seed_trial, tune_trials, *, channel: str = "voltage_1",
-                           cell_id: Optional[str] = None, save: bool = True):
+                           cell_id: Optional[str] = None, save: bool = True,
+                           field: Optional[str] = None):
     """Run interactive tuning on the concatenated voltage of ``tune_trials``.
 
     Walks the user through ``FilterGUIQt → TemplateSelectionGUIQt →
@@ -557,8 +686,13 @@ def tune_params_on_trials(seed_trial, tune_trials, *, channel: str = "voltage_1"
     Mirrors the ``scripts/tune_trials.py`` workflow but takes already-
     loaded Trial objects so callers (e.g. the trial browser) don't have
     to re-walk the file system.
+
+    ``field`` (default: :func:`default_field` of ``channel``) is where the
+    params are read from and saved to, so tuning an EMG channel never
+    touches the intracellular ``spikes`` result.
     """
     sd = _import_spikedetect()
+    field = field or default_field(channel)
     from spikedetect import Recording, SignalFilter
     from spikedetect.gui import (
         FilterGUIQt, TemplateSelectionGUIQt, ThresholdGUIQt,
@@ -588,7 +722,8 @@ def tune_params_on_trials(seed_trial, tune_trials, *, channel: str = "voltage_1"
         voltage=voltage, sample_rate=float(fs),
     )
 
-    params = initial_params(seed_trial, fs=fs, cell_id=cell_id)
+    params = initial_params(seed_trial, fs=fs, cell_id=cell_id, field=field,
+                            channel=channel)
 
     params = FilterGUIQt(rec.voltage, params).run()
     filtered = SignalFilter.filter_data(
@@ -612,23 +747,34 @@ def tune_params_on_trials(seed_trial, tune_trials, *, channel: str = "voltage_1"
 
     if save:
         if cell_id is not None:
-            save_cell_params(cell_id, params)
-        save_params_to_trial(seed_trial, params)
+            save_cell_params(cell_id, params, field=field, channel=channel)
+        save_params_to_trial(seed_trial, params, field=field, channel=channel)
     return params
 
 
 def detect_spikes_for_trial(trial, params, channel: str = "voltage_1",
-                             save: bool = False):
+                             save: bool = False, field: Optional[str] = None,
+                             correct_times: bool = True):
     """Run the full detection pipeline on a single mapd.Trial.
 
     `params.fs` is snapped to the trial's actual sample rate; the caller's
-    params object is not modified.
+    params object is not modified. ``field`` defaults to
+    :func:`default_field` of ``channel`` (EMGspikes for a current channel).
+
+    ``correct_times=False`` keeps the filtered-peak times as the spike times
+    instead of moving each one to the inflection point of its rising phase.
+    That correction was built for the intracellular spike shape; an EMG unit
+    can be biphasic, so check it in the spot-check before trusting it there.
+    Both versions are always stored (``*_uncorrected`` holds the peaks).
     """
     sd = _import_spikedetect()
+    field = field or default_field(channel)
     rec = trial_to_recording(trial, channel=channel)
     result = sd.detect_spikes(rec, _params_with_fs(params, rec.sample_rate))
+    if not correct_times:
+        result.spike_times = result.spike_times_uncorrected.copy()
     if save:
-        save_spikes_to_trial(trial, result)
+        save_spikes_to_trial(trial, result, field=field, channel=channel)
     return result
 
 
@@ -737,8 +883,10 @@ def collect_candidates(trials: Iterable, params, channel: str = "voltage_1",
 
 
 def batch_detect_spikes(trials: Iterable, params, channel: str = "voltage_1",
-                         save: bool = False, verbose: bool = True):
-    """Run full detection on a list of mapd.Trials.
+                         save: bool = False, verbose: bool = True,
+                         field: Optional[str] = None, correct_times: bool = True):
+    """Run full detection on a list of mapd.Trials (see
+    :func:`detect_spikes_for_trial` for ``field`` and ``correct_times``).
 
     Returns
     -------
@@ -748,7 +896,8 @@ def batch_detect_spikes(trials: Iterable, params, channel: str = "voltage_1",
     results = {}
     rows = []
     for tr in trials:
-        r = detect_spikes_for_trial(tr, params, channel=channel, save=save)
+        r = detect_spikes_for_trial(tr, params, channel=channel, save=save,
+                                    field=field, correct_times=correct_times)
         tnum = int(tr.params["trial"])
         dur = float(tr.params["samples"]) / float(tr.params["sampratein"])
         rate = r.n_spikes / dur if dur > 0 else np.nan

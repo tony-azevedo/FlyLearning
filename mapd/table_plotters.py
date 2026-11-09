@@ -342,7 +342,17 @@ def plot_outcomes(self,savefig=False,format=None,fig_dir=None):
             )
         ax.add_patch(rect)
         ax.text(tr_min,rec_min,'NC cut', fontsize=8, ha='left', va='center')
-    
+
+    # Mark where each antenna stage starts (only for flies that change stage)
+    if 'antenna_state' in self.df.columns:
+        stages = self.df['antenna_state'].dropna()
+        if stages.nunique() > 1:
+            starts = stages[stages != stages.shift()]
+            for tr, stage in starts.items():
+                ax.axvline(tr - 0.5, color='black', lw=0.8, ls='--')
+                ax.text(tr, 1.0, f' {stage}', transform=ax.get_xaxis_transform(),
+                        fontsize=8, ha='left', va='bottom')
+
     # Indicate Blue or Green LED
     if 'filtercube_status' in self.df.columns:
         rec_min = self.df['as_outcome'].cat.categories.get_loc('info')
@@ -547,7 +557,11 @@ def plot_probe_distribution(self,binwidth=2,bin_min=-500,bin_max=10,
     return fig, ax
 
 
-def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=None,cmax=None):
+def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=None,cmax=None,extension=False,trial_rows=True):
+    # extension=True: for the leg-extension task, light at probeZero going dark through blues (Blues)
+    # instead of the flexion task's rocket (dark at max flexion, light at probeZero)
+    # trial_rows=True: one row per trial number, so the y axis reads in trials and excluded
+    # trials show as grey rows. False packs the included trials into consecutive rows.
     if not 'is_rest' in self.df.columns:
         raise AttributeError('Need to run T.extract_trial_properties()')
     
@@ -556,8 +570,15 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
     fig = Figure(figsize=(8, 8), dpi=300)
     ax = fig.add_subplot(111)
     
-    rocket_cmap = sns.color_palette("rocket", as_cmap=True)
+    # hm_cmap = sns.color_palette("Blues" if extension else "rocket", as_cmap=True)
+    hm_cmap = sns.color_palette("mako_r" if extension else "rocket", as_cmap=True)
+    # hm_cmap = sns.color_palette("PuBu" if extension else "rocket", as_cmap=True)
     
+    # if extension:
+    #     hm_cmap = sns.cubehelix_palette(start=2.6, rot=0.2, dark=0.05, light=0.95, as_cmap=True)
+    # else:
+    #     hm_cmap = sns.color_palette("rocket", as_cmap=True)
+
     if cmin is None:
         cmin = np.min(probe_position_hm_df.values)
     if cmax is None:
@@ -573,26 +594,39 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
 
         probe_position_hm_df = probe_position_hm_df.loc[index]
 
-    im = ax.imshow(probe_position_hm_df.values, 
-                    aspect='auto', 
-                    cmap=rocket_cmap, 
+    t = self.df.loc[probe_position_hm_df.index] #[['op_cnd_blocks','pyasState']]
+    t = t[t['is_rest']==False]
+
+    if trial_rows:
+        first, last = probe_position_hm_df.index.min(), probe_position_hm_df.index.max()
+        probe_position_hm_df = probe_position_hm_df.reindex(np.arange(first, last + 1))
+        y_extent = (last + 0.5, first - 0.5)
+        hm_cmap = hm_cmap.copy()
+        hm_cmap.set_bad('0.75')
+    else:
+        y_extent = (probe_position_hm_df.shape[0], 0)
+
+    im = ax.imshow(probe_position_hm_df.values,
+                    aspect='auto',
+                    cmap=hm_cmap,
                     vmin=cmin,
                     vmax=cmax,
-                    extent=(probe_position_hm_df.columns.min(), 
-                            probe_position_hm_df.columns.max(), 
-                            probe_position_hm_df.shape[0],
-                            0),
+                    extent=(probe_position_hm_df.columns.min(),
+                            probe_position_hm_df.columns.max(),
+                            *y_extent),
                     origin='upper')
 
     # Put on rectangles to indicate pyas state
-    t = self.df.loc[probe_position_hm_df.index] #[['op_cnd_blocks','pyasState']]
-    t = t[t['is_rest']==False]
     for ocb in t.op_cnd_blocks.unique():
         # print(ocb)
         T_rows = t[t.op_cnd_blocks==ocb]
-        
-        tr_min = T_rows.index.min() - t.index.min()
-        tr_max = T_rows.index.max() - t.index.min()
+
+        if trial_rows:
+            tr_min = T_rows.index.min() + 0.5
+            tr_max = T_rows.index.max() + 0.5
+        else:
+            tr_min = T_rows.index.min() - t.index.min()
+            tr_max = T_rows.index.max() - t.index.min()
         t_min = probe_position_hm_df.columns.min()
         t_max = probe_position_hm_df.columns[-3]
         width = t_max-t_min
@@ -609,10 +643,15 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
         ax.add_patch(rect)
 
         # target patches
-        pyas_target = T_rows['pyasXPosition'].mean() + T_rows['pyasWidth'].mean() - T_rows['probeZero'].mean()
+        # colour by the least-force edge, the one nearest probeZero: the target spans
+        # [pyasXPosition, pyasXPosition + pyasWidth] - probeZero, so that's the upper edge
+        # for flexion (negative) and the lower edge for extension (positive)
+        pyas_target = T_rows['pyasXPosition'].mean() - T_rows['probeZero'].mean()
+        if not extension:
+            pyas_target += T_rows['pyasWidth'].mean()
         normalized_value = (pyas_target - cmin) / (cmax - cmin)
         # print(normalized_value)
-        tgt_clr = rocket_cmap(normalized_value)
+        tgt_clr = hm_cmap(normalized_value)
         # print(tgt_clr)
         rect = patches.Rectangle(
                 (t_min,tr_min-1),        # Bottom-left corner of the rectangle
@@ -645,7 +684,8 @@ def plot_probe_position_heatmap(self,index=None,savefig=False,format=None,cmin=N
     if savefig or (not format is None):
         format = format or 'png'
         os.makedirs(f'{self.fig_folder}', exist_ok=True)
-        fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_heatmap.{format}',format=format)
+        trials = f'{probe_position_hm_df.index[0]}_{probe_position_hm_df.index[-1]}'
+        fig.savefig(f'{self.fig_folder}/{self._dfc}_{self._genotype}_heatmap_{trials}.{format}',format=format)
 
 
     return fig, ax, probe_position_hm_df
@@ -838,7 +878,17 @@ def plot_plotting_context(self,ax=None,rec_min=0,rec_max=1):
             )
         ax.add_patch(rect)
         ax.text(tr_min,rec_min,'NC cut', fontsize=8, ha='left', va='center')
-    
+
+    # Mark where each antenna stage starts (only for flies that change stage)
+    if 'antenna_state' in self.df.columns:
+        stages = self.df['antenna_state'].dropna()
+        if stages.nunique() > 1:
+            starts = stages[stages != stages.shift()]
+            for tr, stage in starts.items():
+                ax.axvline(tr - 0.5, color='black', lw=0.8, ls='--')
+                ax.text(tr, 1.0, f' {stage}', transform=ax.get_xaxis_transform(),
+                        fontsize=8, ha='left', va='bottom')
+
     # Indicate Blue or Green LED
     if '_filtercube_status_cat' in self.df.columns:
         rec_min = self.df['as_outcome'].cat.categories.get_loc('info')

@@ -533,7 +533,7 @@ def per_frame_records(trial, sigma_s=SIGMA_S, trim_edges_s=0.075,
                       rate_specs=None, with_vm=False, vm_kwargs=None,
                       vm_control=False, vm_specs=None, pad_trials=None,
                       mark_cue=True, cue_margin_s=0.0, raw_channels=None,
-                      keep_silent=False, **bout_kwargs):
+                      keep_silent=False, spike_field='spikes', **bout_kwargs):
     """Return DataFrame of {t, x, state, rate, n_sp} sampled at camera frames.
     Returns None if the trial has no detected spikes or no probe data.
 
@@ -612,7 +612,9 @@ def per_frame_records(trial, sigma_s=SIGMA_S, trim_edges_s=0.075,
     # rate is a true zero, not missing data. Trials with no detection result at
     # all still return None and are still dropped. See
     # ephys.trial_spike_times for why this matters on a quiet cell.
-    spike_s = ephys.trial_spike_times(trial, allow_empty=keep_silent)
+    # spike_field: 'spikes' (intracellular) or 'EMGspikes' (extracellular).
+    spike_s = ephys.trial_spike_times(trial, allow_empty=keep_silent,
+                                      field=spike_field)
     if spike_s is None:
         return None
     # Spikes from the adjacent trials, in this trial's clock. Recording is
@@ -623,7 +625,8 @@ def per_frame_records(trial, sigma_s=SIGMA_S, trim_edges_s=0.075,
     if pad_trials is not None:
         prev_trial, next_trial = pad_trials
         padded = ephys.padded_spike_times(trial, prev_trial, next_trial,
-                                          allow_empty=keep_silent)
+                                          allow_empty=keep_silent,
+                                          field=spike_field)
         if padded is None:
             padded = spike_s
         # Only a pad on *both* sides makes the rate fully supported; with one

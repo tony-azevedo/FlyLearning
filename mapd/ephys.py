@@ -89,6 +89,7 @@ def spike_rate_from_trial(
     trial,
     t_axis: np.ndarray | None = None,
     sigma_s: float = SIGMA_S,
+    field: str = 'spikes',
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load detected spikes from ``trial`` and return ``(t, rate_hz)``.
 
@@ -106,9 +107,11 @@ def spike_rate_from_trial(
         Output time axis in seconds. Defaults to ``trial.time``.
     sigma_s : float
         Gaussian σ in seconds. Default 25 ms.
+    field : str
+        Stored result to read: ``'spikes'`` or ``'EMGspikes'``.
     """
     try:
-        result = sds.load_spikes_from_trial(trial)
+        result = sds.load_spikes_from_trial(trial, field=field)
     except Exception:
         return None
     if result is None or getattr(result, "n_spikes", 0) == 0:
@@ -182,7 +185,8 @@ def spikes_per_sample(spike_times_s: np.ndarray, t_axis: np.ndarray) -> np.ndarr
     return counts.astype(float)
 
 
-def trial_spike_times(trial, allow_empty: bool = False) -> np.ndarray | None:
+def trial_spike_times(trial, allow_empty: bool = False,
+                      field: str = 'spikes') -> np.ndarray | None:
     """Detected spike times of ``trial``, in the trial's own (stimulus-centered)
     time frame.
 
@@ -201,9 +205,12 @@ def trial_spike_times(trial, allow_empty: bool = False) -> np.ndarray | None:
     ``allow_empty=True`` returns an empty array for "ran, found none" and keeps
     None for "never ran", so a caller can keep the silent trials without
     silently swallowing undetected ones.
+
+    ``field`` picks the stored result: ``'spikes'`` (intracellular) or
+    ``'EMGspikes'`` (extracellular / EMG), see ``spike_detection.field_keys``.
     """
     try:
-        result = sds.load_spikes_from_trial(trial)
+        result = sds.load_spikes_from_trial(trial, field=field)
     except Exception:
         return None
     if result is None:
@@ -215,7 +222,7 @@ def trial_spike_times(trial, allow_empty: bool = False) -> np.ndarray | None:
 
 
 def padded_spike_times(trial, prev_trial=None, next_trial=None,
-                       allow_empty: bool = False):
+                       allow_empty: bool = False, field: str = 'spikes'):
     """``trial``'s spike times with the neighbours' spikes appended, in *its* clock.
 
     Recording is continuous across consecutive trials, so the spikes either side
@@ -246,16 +253,16 @@ def padded_spike_times(trial, prev_trial=None, next_trial=None,
     it should carry the tail of a neighbour's spike. With it, a silent trial
     still gets its neighbours' support.
     """
-    own = trial_spike_times(trial, allow_empty=allow_empty)
+    own = trial_spike_times(trial, allow_empty=allow_empty, field=field)
     if own is None:
         return None
     parts = [own]
     if prev_trial is not None:
-        s = trial_spike_times(prev_trial, allow_empty=allow_empty)
+        s = trial_spike_times(prev_trial, allow_empty=allow_empty, field=field)
         if s is not None:
             parts.append(s - float(prev_trial.total_duration))
     if next_trial is not None:
-        s = trial_spike_times(next_trial, allow_empty=allow_empty)
+        s = trial_spike_times(next_trial, allow_empty=allow_empty, field=field)
         if s is not None:
             parts.append(s + float(trial.total_duration))
     return np.sort(np.concatenate(parts))

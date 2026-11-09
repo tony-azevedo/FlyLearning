@@ -73,11 +73,13 @@ class _SpikeDetectWorker(QObject):
     progress = Signal(int, int)
     finished = Signal(int, int)
 
-    def __init__(self, trials, params, channel: str = "voltage_1"):
+    def __init__(self, trials, params, channel: str = "voltage_1",
+                 field: str = "spikes"):
         super().__init__()
         self.trials = trials
         self.params = params
         self.channel = channel
+        self.field = field
         self._stop = False
 
     def stop(self):
@@ -97,6 +99,7 @@ class _SpikeDetectWorker(QObject):
             try:
                 sds.detect_spikes_for_trial(
                     tr, self.params, channel=self.channel, save=True,
+                    field=self.field,
                 )
             except Exception as e:
                 failed += 1
@@ -374,6 +377,33 @@ class TrialBrowser(QMainWindow):
         box = QGroupBox("Spike detection")
         layout = QVBoxLayout(box)
 
+        # Which electrode to detect on. The result field follows it: a voltage
+        # channel writes /spikes (intracellular), any current / EMG channel
+        # writes /EMGspikes -- the MATLAB names -- so detecting EMG never
+        # overwrites a cell's intracellular spikes. Overlays, Check and the
+        # Spikes label all read the field of the channel chosen here.
+        row0 = QHBoxLayout()
+        lbl0 = QLabel("channel:")
+        lbl0.setFixedWidth(54)
+        self.spike_channel_combo = QComboBox()
+        for ch in EPHYS_CHANNELS:
+            self.spike_channel_combo.addItem(ch)
+        start_ch = self._initial_spike_channel()
+        self.spike_channel_combo.setCurrentText(start_ch)
+        self.spike_field_label = QLabel()
+        self.spike_channel_combo.setToolTip(
+            "Channel to tune / detect / check spikes on.\n"
+            "voltage_* -> /spikes; current_* and current_extEMG -> /EMGspikes."
+        )
+        self.spike_channel_combo.currentTextChanged.connect(
+            self._on_spike_channel_changed)
+        row0.addWidget(lbl0)
+        row0.addWidget(self.spike_channel_combo)
+        row0.addWidget(self.spike_field_label)
+        row0.addStretch(1)
+        layout.addLayout(row0)
+        self._show_spike_field()
+
         row1 = QHBoxLayout()
         lbl = QLabel("tune N:")
         lbl.setFixedWidth(54)
@@ -397,7 +427,7 @@ class TrialBrowser(QMainWindow):
         self.detect_range_edit.setMaximumWidth(140)
         self.detect_range_edit.setToolTip(
             "Inclusive trial-number range to detect on, e.g. 50-200. "
-            "Leave blank to detect on every trial in the table."
+            "Leave blank to detect on the current trial only."
         )
         row2.addWidget(lbl2)
         row2.addWidget(self.detect_range_edit)
@@ -436,6 +466,44 @@ class TrialBrowser(QMainWindow):
         btn_row.addWidget(self.spike_check_btn)
         layout.addLayout(btn_row)
         return box
+
+    def _initial_spike_channel(self) -> str:
+        """The channel last tuned for EMG on this cell (stored in its
+        ``spike_detection_<cell>_EMGspikes.json``), else ``voltage_1``."""
+        from .. import spike_detection as sds
+        try:
+            ch = sds.cell_params_channel(self.table.dfc, "EMGspikes")
+        except Exception:
+            ch = None
+        return ch if ch in EPHYS_CHANNELS else "voltage_1"
+
+    def _spike_channel(self) -> str:
+        combo = getattr(self, "spike_channel_combo", None)
+        return "voltage_1" if combo is None else combo.currentText()
+
+    def _spike_field(self) -> str:
+        from .. import spike_detection as sds
+        return sds.default_field(self._spike_channel())
+
+    def _show_spike_field(self):
+        self.spike_field_label.setText(f"→ /{self._spike_field()}")
+
+    def _on_spike_channel_changed(self, channel: str):
+        """Show the chosen channel's trace and redraw with its field.
+
+        A current / EMG channel also blanks the ephys y limits (the startup
+        default is a Vm window in mV, which shows nothing of a pA or EMG trace).
+        """
+        self._show_spike_field()
+        if not channel.startswith("voltage"):
+            for e in self._limit_edits.get("ephys_y", ()):
+                e.setText("")
+            self._on_limits_changed()
+        cb = self._channel_boxes.get(channel)
+        if cb is not None and not cb.isChecked():
+            cb.setChecked(True)          # triggers a redraw via _on_channel_toggled
+        elif self._current_trial_number is not None:
+            self.show_trial(self._current_trial_number)
 
     def _wire_shortcuts(self):
         QShortcut(QKeySequence(Qt.Key_Left), self, activated=self.on_prev)
@@ -647,6 +715,7 @@ class TrialBrowser(QMainWindow):
         try:
             return sds.tune_params_on_trials(
                 seed_trial, tune_trials, cell_id=cell_id, save=True,
+                channel=self._spike_channel(), field=self._spike_field(),
             )
         except Exception as e:
             self.statusBar().showMessage(f"Tuning aborted: {e}", 8000)
@@ -693,19 +762,22 @@ class TrialBrowser(QMainWindow):
             self.statusBar().showMessage("No current trial to spot-check", 4000)
             return
         trial = self.table.df.at[self._current_trial_number, "Trial"]
+        field = self._spike_field()
         try:
-            result = sds.load_spikes_from_trial(trial)
+            result = sds.load_spikes_from_trial(trial, field=field)
         except Exception as e:
             self.statusBar().showMessage(f"Failed to load spikes: {e}", 6000)
             return
         if result is None:
             self.statusBar().showMessage(
-                "No /spikeDetectionParams on this trial — run Detect first",
+                f"No /{field} result on this trial — run Detect first",
                 6000,
             )
             return
 
-        rec = sds.trial_to_recording(trial)
+        # Check on the electrode the result was detected on, when recorded.
+        channel = sds.result_channel(trial, field) or self._spike_channel()
+        rec = sds.trial_to_recording(trial, channel=channel)
         self._set_busy(True)
         try:
             try:
@@ -714,7 +786,8 @@ class TrialBrowser(QMainWindow):
                 self.statusBar().showMessage(f"Spot-check aborted: {e}", 6000)
                 return
             try:
-                sds.save_spikes_to_trial(trial, edited, spot_checked=True)
+                sds.save_spikes_to_trial(trial, edited, spot_checked=True,
+                                         field=field)
             except Exception as e:
                 self.statusBar().showMessage(f"Save failed: {e}", 6000)
                 return
@@ -774,7 +847,9 @@ class TrialBrowser(QMainWindow):
         # both `_spike_thread` and `_spike_worker` is required — letting
         # either go out of scope before the run finishes would crash Qt.
         self._spike_thread = QThread(self)
-        self._spike_worker = _SpikeDetectWorker(detect_trials, params)
+        self._spike_worker = _SpikeDetectWorker(
+            detect_trials, params, channel=self._spike_channel(),
+            field=self._spike_field())
         self._spike_worker.moveToThread(self._spike_thread)
 
         self._spike_thread.started.connect(self._spike_worker.run)
@@ -896,7 +971,8 @@ class TrialBrowser(QMainWindow):
                 try:
                     # Pushed to every overlay; those that don't smooth just store
                     # it (see Overlay.set_params).
-                    overlay.set_params(sigma_s=sigma_s)
+                    overlay.set_params(sigma_s=sigma_s,
+                                       spike_field=self._spike_field())
                     if blank is not None and name == "Subthreshold Vm":
                         overlay.set_params(blank=blank)
                     overlay.draw(trial, axes)
@@ -930,7 +1006,7 @@ class TrialBrowser(QMainWindow):
         is_fresh = False
         ts = None
         try:
-            result = sds.load_spikes_from_trial(trial)
+            result = sds.load_spikes_from_trial(trial, field=self._spike_field())
         except Exception:
             result = None
         if result is not None:

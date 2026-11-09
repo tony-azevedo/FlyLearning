@@ -17,6 +17,8 @@ Figure7/*
 FigureS1_norpA/*
 FigureS2_vnc_cut/*
 Figures_opcond_R01/*
+scripts/rootCA.crt
+scripts/rootCA.pem
 data_cache/folded_blocks/*
 scripts/figpanels_browser/*
 
@@ -27,3 +29,13 @@ Notes/*
 __pycache__/
 *.pyc
 *.pyo
+
+# Generated outputs and caches: all reproducible from the raw data + code
+data_cache/
+Figure*/
+*.pkl
+*.parquet
+*.svg
+*.png
+*.pdf
+*.html

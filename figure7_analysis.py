@@ -2499,7 +2499,7 @@ def build_cell_records(sinq, cell_id, sigma_s=SIGMA_S, with_vm=True,
                        rate_specs=None, vm_specs=None, sta_trials=8,
                        add_timing=True, drop_table=True, keep_table=False,
                        raw_channels=None, verbose=True, keep_silent=False,
-                       **bout_kwargs):
+                       spike_field='spikes', **bout_kwargs):
     """Gather one cell's per-frame records. No analysis, no figures.
 
     This is the expensive step — restoring the Table, reading voltage, smoothing —
@@ -2545,7 +2545,8 @@ def build_cell_records(sinq, cell_id, sigma_s=SIGMA_S, with_vm=True,
             # the second. Default False preserves the previous behaviour --
             # which discarded roughly half the A4 trials, so flip it and rebuild
             # before quoting any rate for these cells.
-            if ephys.trial_spike_times(trial, allow_empty=keep_silent) is None:
+            if ephys.trial_spike_times(trial, allow_empty=keep_silent,
+                                       field=spike_field) is None:
                 n_no_spikes += 1
                 continue
             rec = ba.per_frame_records(
@@ -2556,7 +2557,7 @@ def build_cell_records(sinq, cell_id, sigma_s=SIGMA_S, with_vm=True,
                 if with_vm else None,
                 pad_trials=ba.neighbour_trials(T, tn) if pad_spikes else None,
                 raw_channels=raw_channels, keep_silent=keep_silent,
-                **bout_kwargs)
+                spike_field=spike_field, **bout_kwargs)
             if rec is not None:
                 rec['trial'] = tn
                 frames.append(rec)

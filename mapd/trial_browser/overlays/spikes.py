@@ -19,10 +19,14 @@ from ..overlay import Overlay, register_overlay
 @register_overlay
 class SpikesOverlay(Overlay):
     name = "Spikes"
+    # 'spikes' (intracellular) or 'EMGspikes'; the browser sets it from the
+    # spike panel's channel.
+    DEFAULT_PARAMS = {"spike_field": "spikes"}
 
     def draw(self, trial, axes):
         try:
-            result = sds.load_spikes_from_trial(trial)
+            result = sds.load_spikes_from_trial(
+                trial, field=self.params.get("spike_field", "spikes"))
         except Exception:
             return
         if result is None:

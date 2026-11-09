@@ -169,6 +169,9 @@ _outcomes_dict = {
 _as_outcomes_cat =             pd.api.types.CategoricalDtype(categories=_outcomes_dict.keys(), ordered=True)
 _pyasState_cat =                     pd.api.types.CategoricalDtype(categories=['no_state','lo','hi'], ordered=True)
 _vnc_status_cat =           pd.api.types.CategoricalDtype(categories=['intact','cut'], ordered=True)
+# Named for what is left of the antenna: a1_arista = intact, a1_a3 = arista cut,
+# a1_a2 = a3 cut (Johnston's organ left), no_antenna = everything gone.
+_antenna_state_cat =        pd.api.types.CategoricalDtype(categories=['a1_arista','a1_a3','a1_a2','no_antenna'], ordered=True)
 _filtercube_status_cat =    pd.api.types.CategoricalDtype(categories=['green','blue'], ordered=False)
 _fiberLED_cat =    pd.api.types.CategoricalDtype(categories=['epi_only','740_ir','625_red','590_orange','470_blue','405_uv'], ordered=True)
 # Ordered so that ``df.ephys_status >= 'redetect'`` reads as "needs attention".
@@ -178,6 +181,7 @@ _category_dict = {
     'as_outcome': _as_outcomes_cat,
     'pyasState': _pyasState_cat,
     'vnc_status': _vnc_status_cat,
+    'antenna_state': _antenna_state_cat,
     'filtercube_status': _filtercube_status_cat,
     'fiberLED': _fiberLED_cat,
     EPHYS_STATUS_KEY: _ephys_status_cat,
@@ -1258,6 +1262,12 @@ class Table:
             'ppk-Gal4;10XUAS-ChR in WT':       '+;ppk-GAL4;10XUAS-ChR',
             '+;ppk-GAL4;10XUAS-ChR':           '+;ppk-GAL4;10XUAS-ChR',
             'Hot-Cell-Gal4_ChrinWT':           '+;Hot-cell-GAL4;10XUAS-ChR',
+            # Kir2.1 silencing, Oct-Nov 2026 (MB504B is the PPL1 split, MB010B the KC split)
+            '+;58E02_Kir2_1':                  '+;58E02-GAL4_UAS-Kir21',
+            '+;PPL1_Kir2_1':                   '+;MB504B_UAS-Kir21',
+            '+;MB504B_Kir2_1':                 '+;MB504B_UAS-Kir21',
+            '+;MB010B_Kir2_1':                 '+;MB010B_UAS-Kir21',
+            '+;DPM_Kir2_1':                    '+;DPM_UAS-Kir21',
         }
         if self._genotype in geno_map.keys():
             self._genotype = geno_map[self._genotype]

@@ -103,7 +103,8 @@ def positive_effort(t, x):
     return np.trapezoid(np.clip(pwr, a_min=0, a_max=None), t)
 
 
-def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
+def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0, direction=1,
+                            extend_while_below=None):
     """
     Cumulative v_rms and positive effort from the first bout start to the
     last bout end before the final prolonged rest within the trial-1 window.
@@ -127,6 +128,17 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
     trials : list of Trial objects or None
     no_bout_post_as_s : float — seconds past AS-off to include in the
         fallback window when no bouts were detected.
+    direction : +1 or -1 — which way counts as "toward target" for effort.
+        Effort only credits work done pulling away from rest toward target,
+        which is +x for the standard (flexion) task. Extension flies pull
+        toward -x; pass -1 or their effort comes out ~0. v_rms is unaffected.
+    extend_while_below : float or None — if the probe is still below this x
+        when trial 1 ends (an extension fly pinned at the extreme), don't cap
+        the window there: run it to the end of that bout, i.e. through the
+        release and snap-back to the first genuine rest. Use the same value as
+        detect_movement_bouts(no_rest_below=...). Velocity at the trial
+        junction is zeroed so the unrecorded inter-trial gap adds no spike.
+        Returns ``extended=True`` when this happened.
 
     Returns
     -------
@@ -172,7 +184,8 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
             return zero
         bv = velocity(bt, bx)
         cum_v_rms = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
-        bp_pwr = np.clip(k_spring_constant * bx * np.clip(bv, 0, None), 0, None)
+        bx_e, bv_e = direction * bx, direction * bv
+        bp_pwr = np.clip(k_spring_constant * bx_e * np.clip(bv_e, 0, None), 0, None)
         bdt = np.diff(bt)
         cum_effort = np.concatenate([[0.0],
                          np.cumsum(0.5 * (bp_pwr[:-1] + bp_pwr[1:]) * bdt)])
@@ -186,6 +199,7 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
         )
 
     si = bouts[0]['start_idx']
+    extended = False
 
     if trials is not None and len(trials) >= 1:
         # Find the last bout that starts within trial 1
@@ -199,6 +213,10 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
         # Cap at trial-1 end in sample space
         t1_end_idx = int(np.searchsorted(t, t1_dur))
         ei = min(last_bout['end_idx'], t1_end_idx)
+        if (extend_while_below is not None and last_bout['end_idx'] > t1_end_idx
+                and 0 < t1_end_idx <= len(x) and x[t1_end_idx - 1] < extend_while_below):
+            ei = last_bout['end_idx']
+            extended = True
     else:
         ei = bouts[0]['end_idx']
 
@@ -209,12 +227,16 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
     if len(bt) < 2:
         empty = np.array([])
         return dict(bt=empty, cum_v_rms=empty, cum_effort=empty,
-                    v_rms=0.0, effort=0.0, no_bouts=False)
+                    v_rms=0.0, effort=0.0, no_bouts=False, extended=False)
 
     bv = velocity(bt, bx)
+    if extended:
+        j = t1_end_idx - si          # first trial-2 sample, in window coordinates
+        bv[max(j - 1, 0):j + 1] = 0.0
     cum_v_rms = np.sqrt(np.cumsum(bv ** 2) / np.arange(1, len(bv) + 1))
 
-    bp_pwr = np.clip(k_spring_constant * bx * np.clip(bv, 0, None), 0, None)
+    bx_e, bv_e = direction * bx, direction * bv
+    bp_pwr = np.clip(k_spring_constant * bx_e * np.clip(bv_e, 0, None), 0, None)
     bdt = np.diff(bt)
     cum_effort = np.concatenate([[0.0],
                      np.cumsum(0.5 * (bp_pwr[:-1] + bp_pwr[1:]) * bdt)])
@@ -226,6 +248,7 @@ def bout_cumulative_metrics(bouts, t, x, trials=None, no_bout_post_as_s=1.0):
         v_rms=float(cum_v_rms[-1]),
         effort=float(cum_effort[-1]),
         no_bouts=False,
+        extended=extended,
     )
 
 
@@ -274,7 +297,7 @@ def _rolling_rms(v, n):
 
 
 def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=None,
-                             smooth_window=0.05, x_excursion_min=8.0):
+                             smooth_window=0.05, x_excursion_min=8.0, no_rest=None):
     """
     Schmitt-trigger (hysteretic) state classifier.
 
@@ -289,6 +312,11 @@ def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=Non
     Compared to _classify_states, bout boundaries are cleaner: the exit
     threshold is v_rest (not v_th), so there is no spurious splitting on
     brief velocity dips within a continuous movement.
+
+    ``no_rest`` (bool array, len(v)) marks samples that can never count as
+    quiet, however slow: they neither end a MOVE nor become REST. Used for
+    extension flies pinned at the extreme of their range (see
+    ``detect_movement_bouts(no_rest_below=...)``).
     """
     if fs is None:
         raise ValueError("fs must be provided (sampling rate in Hz)")
@@ -296,6 +324,9 @@ def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=Non
     speed    = _rolling_rms(v, n_smooth)
     n_rest   = max(1, int(round(Dt * fs)))
     n        = len(speed)
+    quiet    = speed < v_rest
+    if no_rest is not None:
+        quiet &= ~np.asarray(no_rest, dtype=bool)
 
     state   = np.full(n, STATE_DRIFT, dtype=np.int8)
     in_move = False
@@ -311,10 +342,10 @@ def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=Non
             i += 1
         else:
             state[i] = STATE_MOVE
-            if speed[i] < v_rest:
+            if quiet[i]:
                 quiet_start = i
                 j = i + 1
-                while j < n and speed[j] < v_rest:
+                while j < n and quiet[j]:
                     j += 1
                 quiet_len = j - quiet_start
                 if quiet_len >= n_rest:
@@ -347,10 +378,10 @@ def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=Non
             # scan non-MOVE region [i:j] for sustained quiet runs
             k = i
             while k < j:
-                if speed[k] < v_rest:
+                if quiet[k]:
                     rest_start = k
                     m = k + 1
-                    while m < j and speed[m] < v_rest:
+                    while m < j and quiet[m]:
                         m += 1
                     if m - rest_start >= n_rest:
                         state[rest_start:m] = STATE_REST
@@ -365,7 +396,7 @@ def _classify_states_schmitt(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=Non
 
 
 def _classify_states(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=None,
-                     smooth_window=0.05, x_excursion_min=8.0, move_gap=0.3):
+                     smooth_window=0.05, x_excursion_min=8.0, move_gap=0.3, no_rest=None):
     """
     Classify a velocity array into REST / DRIFT / MOVE per sample.
 
@@ -396,8 +427,11 @@ def _classify_states(v, x=None, v_th=V_TH, v_rest=V_REST, Dt=0.2, fs=None,
     speed  = _rolling_rms(v, n_smooth)
     n_rest = max(1, int(round(Dt * fs)))
 
-    raw = np.where(speed >= v_th,  STATE_MOVE,
-          np.where(speed <  v_rest, STATE_REST, STATE_DRIFT)).astype(np.int8)
+    quiet = speed < v_rest
+    if no_rest is not None:
+        quiet &= ~np.asarray(no_rest, dtype=bool)
+    raw = np.where(speed >= v_th, STATE_MOVE,
+          np.where(quiet, STATE_REST, STATE_DRIFT)).astype(np.int8)
 
     state = raw.copy()
     i, n  = 0, len(raw)
@@ -529,6 +563,7 @@ def detect_movement_bouts(
     move_gap=0.3,
     classifier=_classify_states_schmitt,
     junction_indices=None,
+    no_rest_below=None,
 ):
     """
     Detect movement bouts in a probe position trace.
@@ -557,6 +592,11 @@ def detect_movement_bouts(
     junction_indices : list of int or None — sample indices where trial boundaries
                        fall in the concatenated trace; velocity is zeroed there to
                        prevent spurious spikes from position discontinuities.
+    no_rest_below    : float or None — samples with x below this can never be REST
+                       (nor end a bout), however still. For extension flies, which
+                       pull to the extreme of their range and sit there: without it
+                       that hold reads as rest and the bout ends early. Default None
+                       leaves classification unchanged.
 
     Returns
     -------
@@ -584,6 +624,9 @@ def detect_movement_bouts(
 
     shared_kwargs = dict(v_th=v_th, v_rest=v_rest, Dt=Dt, fs=fs,
                          smooth_window=smooth_window, x_excursion_min=x_excursion_min)
+
+    if no_rest_below is not None:
+        shared_kwargs['no_rest'] = x < no_rest_below
 
     if classifier is _classify_states:
         states = classifier(v, x, move_gap=move_gap, **shared_kwargs)
@@ -678,6 +721,7 @@ def plot_bouts(
     show_drift_patches=True,
     cum_vrms_all_bouts=False,
     context_trial=None,
+    direction=1,
 ):
     """
     Interactive Plotly figure for inspecting bout detection results.
@@ -908,6 +952,7 @@ def plot_bouts(
     metrics = bout_cumulative_metrics(
         bouts, t, x,
         trials=trials if cum_vrms_all_bouts else None,
+        direction=direction,
     )
     bt         = metrics['bt']
     cum_v_rms  = metrics['cum_v_rms']

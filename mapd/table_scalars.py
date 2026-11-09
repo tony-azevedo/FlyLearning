@@ -127,6 +127,20 @@ def compute_hard_successes(self):
     # print(fracs)
     return successes
 
+def compute_soft_sudden_punishments(self):
+    if not 'soft_sudden_punishment' in self.df.columns:
+        self.find_sudden_punishment_trials()
+    successes = self.df['soft_sudden_punishment'].sum()
+    # print(fracs)
+    return successes
+
+def compute_sudden_punishments(self):
+    if not 'sudden_punishment' in self.df.columns:
+        self.find_sudden_punishment_trials()
+    sudden_pushiments = self.df['sudden_punishment'].sum()
+    # print(fracs)
+    return sudden_pushiments
+
 
 def compute_outcome_fractions(self):
     if not 'as_outcome' in self.df.columns:

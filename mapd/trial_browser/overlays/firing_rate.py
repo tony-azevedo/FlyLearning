@@ -19,6 +19,7 @@ class FiringRateOverlay(Overlay):
     DEFAULT_PARAMS = {
         "sigma_s": 0.025,   # 25 ms — full kernel ≈ 100 ms (±2σ)
         "shade_edges": True,
+        "spike_field": "spikes",   # or 'EMGspikes'; set by the browser
     }
 
     def __init__(self):
@@ -27,7 +28,9 @@ class FiringRateOverlay(Overlay):
 
     def draw(self, trial, axes):
         sigma_s = float(self.params.get("sigma_s", self.SIGMA_S))
-        result = ephys.spike_rate_from_trial(trial, sigma_s=sigma_s)
+        result = ephys.spike_rate_from_trial(
+            trial, sigma_s=sigma_s,
+            field=self.params.get("spike_field", "spikes"))
         if result is None:
             return
         t, rate = result
